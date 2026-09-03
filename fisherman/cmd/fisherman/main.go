@@ -814,6 +814,18 @@ func main() {
 		}
 	}
 
+	// Render the GRUB menu from the BLS entries, for an image whose GRUB
+	// cannot read them itself. Last of the boot-entry steps deliberately: the
+	// menu bakes each entry's `options` line into its `linux` command, so it
+	// has to run after the Plymouth and LUKS arguments above are in place or
+	// it would render a menu that boots without them. Non-fatal, and skipped
+	// entirely by an image that ships no renderer.
+	if rendered, err := post.RenderGrubMenu(activeTargetMount); err != nil {
+		progress.Info(fmt.Sprintf("Warning: could not render GRUB menu: %v", err))
+	} else if rendered {
+		progress.Info("Rendered the GRUB menu from the BLS entries")
+	}
+
 	// Copy Bluetooth pairings from live session so paired keyboards/mice
 	// reconnect on first boot without re-pairing. Non-fatal.
 	if err := post.CopyBluetoothPairings(activeTargetMount); err != nil {
