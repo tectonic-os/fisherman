@@ -811,6 +811,8 @@ func main() {
 			progress.Info(fmt.Sprintf("Warning: could not inject LUKS boot args: %v", err))
 		} else if n > 0 {
 			progress.Info(fmt.Sprintf("Injected rd.luks.name into %d boot entr%s", n, map[bool]string{true: "y", false: "ies"}[n == 1]))
+		} else {
+			progress.Info("Warning: no BLS loader entries to inject rd.luks.name into — an installed system that unlocks from the kernel command line will not boot")
 		}
 	}
 
