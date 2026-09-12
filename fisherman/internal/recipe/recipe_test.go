@@ -175,6 +175,47 @@ func TestValidate(t *testing.T) {
 			wantErr: "encryption.type must be",
 		},
 
+		// ── varDisk ───────────────────────────────────────────────────────────
+		{
+			name: "valid varDisk size",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				VarDisk: &recipe.VarDiskSpec{Size: "100GiB"},
+			},
+		},
+		{
+			name: "varDisk size and disk together",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				VarDisk: &recipe.VarDiskSpec{Size: "100GiB", Disk: diskPath},
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "varDisk size with keepExisting",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				VarDisk: &recipe.VarDiskSpec{Size: "100GiB", KeepExisting: true},
+			},
+			wantErr: "keepExisting cannot be set",
+		},
+		{
+			name: "varDisk size on zfs",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "zfs", Hostname: "h",
+				VarDisk: &recipe.VarDiskSpec{Size: "100GiB"},
+			},
+			wantErr: "requires auto-partitioning",
+		},
+		{
+			name: "varDisk with neither size nor disk",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				VarDisk: &recipe.VarDiskSpec{},
+			},
+			wantErr: "varDisk.disk is required",
+		},
+
 		// ── Invalid: hostname ─────────────────────────────────────────────────
 		{
 			name:    "empty hostname",
