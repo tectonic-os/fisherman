@@ -119,23 +119,36 @@ func SetPartitionType(disk string, partNum int, partType string) error {
 // partition devices appear after udevadm settle. Loop devices reject
 // BLKRRPART; we work around this by detaching and re-attaching the loop
 // device with --partscan so the kernel creates /dev/loopNpM nodes.
-func Partition(disk string) error {
-	script := strings.Join([]string{
+//
+// A non-empty varSize (sfdisk size syntax, e.g. "100GiB") cuts a /var
+// partition out of this disk ahead of the root, which then takes what is left.
+func Partition(disk, varSize string) error {
+	lines := []string{
 		"label: gpt",
 		"",
 		`size=2GiB, type=uefi, name="EFI-SYSTEM"`,
 		`size=2GiB,   type=linux, name="boot"`,
-		`type=linux, name="root"`,
-	}, "\n") + "\n"
-	return partition(disk, script)
+	}
+	lines = append(lines, varLine(varSize)...)
+	lines = append(lines, `type=linux, name="root"`)
+	return partition(disk, strings.Join(lines, "\n")+"\n")
+}
+
+// varLine returns the sfdisk line for a sized /var partition, or nothing when
+// no size was given.
+func varLine(varSize string) []string {
+	if varSize == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(`size=%s, type=linux, name="var"`, varSize)}
 }
 
 // PartitionEncrypted wipes disk and creates the same three-partition GPT
 // layout as Partition. The separate unencrypted /boot is also required for
 // encrypted installs so that bootupctl (which runs in a restricted bwrap
 // sandbox) can find the boot filesystem UUID from the raw block device.
-func PartitionEncrypted(disk string) error {
-	return Partition(disk)
+func PartitionEncrypted(disk, varSize string) error {
+	return Partition(disk, varSize)
 }
 
 // PartitionSystemdBoot wipes disk and creates a two-partition GPT layout for
@@ -150,15 +163,17 @@ func PartitionEncrypted(disk string) error {
 // comfortably accommodates the booted entry, rollback, and a staged upgrade
 // without running out of space even if stale entries accumulate.
 // This layout is used for both unencrypted and encrypted systemd-boot installs
-// (encrypted: LUKS wraps partition 2).
-func PartitionSystemdBoot(disk string) error {
-	script := strings.Join([]string{
+// (encrypted: LUKS wraps the root partition). A non-empty varSize inserts a
+// /var partition ahead of the root, as in Partition.
+func PartitionSystemdBoot(disk, varSize string) error {
+	lines := []string{
 		"label: gpt",
 		"",
 		`size=2GiB, type=uefi, name="EFI-SYSTEM"`,
-		`type=linux, name="root"`,
-	}, "\n") + "\n"
-	return partition(disk, script)
+	}
+	lines = append(lines, varLine(varSize)...)
+	lines = append(lines, `type=linux, name="root"`)
+	return partition(disk, strings.Join(lines, "\n")+"\n")
 }
 
 // PartitionZFS wipes disk and creates a two-partition GPT layout for

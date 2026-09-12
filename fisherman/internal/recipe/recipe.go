@@ -54,9 +54,10 @@ type Recipe struct {
 	// BtrfsSubvolumes and the auto-partition steps are skipped; fisherman formats and
 	// mounts the listed partitions directly.
 	CustomMounts []CustomMount `json:"customMounts,omitempty"`
-	// VarDisk optionally describes a separate disk to mount at /var.
-	// When set, fisherman formats (or mounts as-is) this disk before running
-	// bootc, then adds a /var entry to the installed system's fstab.
+	// VarDisk optionally describes a separate disk to mount at /var, or a
+	// size to cut one out of the install disk. When set, fisherman formats
+	// (or mounts as-is) it before running bootc, then adds a /var entry to
+	// the installed system's fstab.
 	VarDisk *VarDiskSpec `json:"varDisk,omitempty"`
 	// AdditionalImageStores lists host paths to be exposed to the bootc
 	// container as containers/storage additionalimagestores. Each path is
@@ -121,10 +122,13 @@ type SlurpUserSpec struct {
 	Categories []string `json:"categories"`
 }
 
-// VarDiskSpec describes an optional separate disk to mount at /var.
+// VarDiskSpec describes an optional separate disk or partition to mount at /var.
+// Exactly one of Disk and Size is given: Disk names a device that already
+// exists, Size cuts /var out of the install disk while partitioning it.
 type VarDiskSpec struct {
-	Disk         string `json:"disk"`         // block device, e.g. "/dev/sdb"
-	KeepExisting bool   `json:"keepExisting"` // if true, mount as-is; if false, format XFS
+	Disk         string `json:"disk"`           // block device, e.g. "/dev/sdb"
+	Size         string `json:"size,omitempty"` // sfdisk size, e.g. "100GiB"; cuts /var out of the install disk
+	KeepExisting bool   `json:"keepExisting"`   // if true, mount as-is; if false, format XFS
 }
 
 // isSupportedMountFstype reports whether a customMount fstype is one
@@ -257,14 +261,28 @@ func (r *Recipe) Validate() error {
 	}
 	// image may be empty in live-ISO mode; bootc auto-detects the running container.
 	if r.VarDisk != nil {
-		if r.VarDisk.Disk == "" {
+		switch {
+		case r.VarDisk.Size != "" && r.VarDisk.Disk != "":
+			return fmt.Errorf("varDisk.size and varDisk.disk are mutually exclusive: size cuts /var out of the system disk, disk names a device of its own")
+		case r.VarDisk.Size != "":
+			// The partition is created by this install, so there is nothing on
+			// it to keep, and neither manual layouts nor ZFS reach the sfdisk
+			// script that would carry it.
+			if r.VarDisk.KeepExisting {
+				return fmt.Errorf("varDisk.keepExisting cannot be set with varDisk.size: the partition is created empty by this install")
+			}
+			if len(r.CustomMounts) > 0 || r.Filesystem == "zfs" {
+				return fmt.Errorf("varDisk.size requires auto-partitioning on a non-ZFS filesystem; give a /var customMount or varDisk.disk instead")
+			}
+		case r.VarDisk.Disk == "":
 			return fmt.Errorf("varDisk.disk is required")
-		}
-		if _, err := os.Stat(r.VarDisk.Disk); err != nil {
-			return fmt.Errorf("varDisk.disk %s: %w", r.VarDisk.Disk, err)
-		}
-		if r.VarDisk.Disk == r.Disk {
-			return fmt.Errorf("varDisk.disk must differ from the system disk")
+		default:
+			if _, err := os.Stat(r.VarDisk.Disk); err != nil {
+				return fmt.Errorf("varDisk.disk %s: %w", r.VarDisk.Disk, err)
+			}
+			if r.VarDisk.Disk == r.Disk {
+				return fmt.Errorf("varDisk.disk must differ from the system disk")
+			}
 		}
 	}
 	if r.Hostname == "" {
