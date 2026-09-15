@@ -723,6 +723,14 @@ func main() {
 		if err := disk.MountEFI(activeTargetMount, activeEfiPart); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not remount EFI partition after retag: %v\n", err)
 		}
+		// Remount /var for the same reason. /home is /var/home, so with the
+		// device gone the user, flatpak and OEM writes below land on the root
+		// filesystem and vanish behind the fstab mount at first boot.
+		if hasVarDisk {
+			if err := disk.Mount(r.VarDisk.Disk, filepath.Join(activeTargetMount, "var"), ""); err != nil {
+				fatal("remounting /var disk after retagging: %v", err)
+			}
+		}
 	}
 
 	// ── TPM2 enrolment ────────────────────────────────────────────────────────
