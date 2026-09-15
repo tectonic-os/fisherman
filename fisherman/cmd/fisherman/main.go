@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,6 +196,61 @@ func checkRequiredTools(r *recipe.Recipe) error {
 }
 
 var version = "dev"
+
+// retagRoot releases the installed root, puts its partition on the Linux root
+// GUID, and mounts it back at targetMount. That GUID is what
+// systemd-gpt-auto-generator looks for when no root= reaches it, which is the
+// sealed UKI's only route to an encrypted root and what a composefs install
+// wants either way.
+//
+// A non-empty mapperPath means the root filesystem is inside a dm-crypt
+// container: the mount is the mapper node and the container is closed before
+// sfdisk writes the table and opened again after. Releasing the raw partition
+// by number finds no mount to release, and mounting the raw partition back up
+// finds the crypto_LUKS header rather than a filesystem.
+func retagRoot(diskDev, rootPart string, rootPartNum int, mapperPath, passphrase, targetMount string) error {
+	encrypted := mapperPath != ""
+	if encrypted {
+		if err := disk.UnmountDevice(mapperPath); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not fully clean container references: %v\n", err)
+		}
+		// A close that fails leaves the container open; the mount below then
+		// uses the node that is still there rather than opening it twice.
+		if _, err := os.Stat(mapperPath); err == nil {
+			if err := luks.Close(luksMapper); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not close %s before retag: %v\n", mapperPath, err)
+			}
+		}
+	} else if err := disk.UnmountPartition(diskDev, rootPartNum); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not fully clean partition references: %v\n", err)
+	}
+	if err := disk.SetPartitionType(diskDev, rootPartNum, disk.GPTPartTypeLinuxRootX86_64); err != nil {
+		return fmt.Errorf("retagging root partition: %w", err)
+	}
+	// Remount root so finalization and post-install writes can proceed.
+	// udisksctl unmount (used above) removes the mountpoint directory it
+	// manages, and disk.Mount — unlike MountTmpfs/BindMount — does not create
+	// its target, so recreate it or the plain `mount` syscall below fails with
+	// ENOENT.
+	if err := os.MkdirAll(targetMount, 0o755); err != nil {
+		return fmt.Errorf("recreating target mountpoint before remount: %w", err)
+	}
+	rootDev := rootPart
+	if encrypted {
+		// Only an absent node means the container is closed; a stat that
+		// failed for any other reason must not lead to opening it twice.
+		if _, err := os.Stat(mapperPath); errors.Is(err, fs.ErrNotExist) {
+			if err := luks.Open(rootPart, passphrase, luksMapper); err != nil {
+				return fmt.Errorf("reopening the root container after retagging: %w", err)
+			}
+		}
+		rootDev = mapperPath
+	}
+	if err := disk.Mount(rootDev, targetMount, ""); err != nil {
+		return fmt.Errorf("remounting root partition after retagging: %w", err)
+	}
+	return nil
+}
 
 func printHelp() {
 	fmt.Printf(`fisherman — bootc disk installer backend
@@ -667,7 +724,12 @@ func main() {
 	// systemd-boot composefs installs rely on GPT auto-discovery for the root
 	// filesystem. Keep the auto-partitioned root on the architecture-specific
 	// Linux root GUID so the installed system can find /sysroot on first boot.
-	if !isManual && isSystemdBoot && !hasEncryption && r.ComposeFsBackend {
+	// An encrypted root needs this most: a sealed UKI carries its own command
+	// line and has no BLS entry for `rd.luks.name`, so the generator opening
+	// the container is the only way in. The `rd.luks` injection below may only
+	// stand down where this ran, because it is what makes a UKI's root reachable.
+	retagsRoot := !isManual && isSystemdBoot && r.ComposeFsBackend
+	if retagsRoot {
 		progress.Info("Retagging root partition for systemd GPT auto-discovery")
 
 		// Ensure BOOTX64.EFI is on the ESP before we touch the mount stack.
@@ -685,25 +747,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "warning: could not unmount EFI partition before retag: %v\n", err)
 		}
 
-		// Release kernel and userspace references to the root partition before
-		// modifying its GPT type. bootc install may have left active references.
-		if err := disk.UnmountPartition(r.Disk, 2); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not fully clean partition references: %v\n", err)
+		// Release kernel and userspace references to the root before modifying
+		// its GPT type. bootc install may have left active references. The
+		// container is opened again with the same key it was formatted with.
+		passphrase := r.Encryption.Passphrase
+		if r.Encryption.Type == "tpm2-luks" {
+			passphrase = luksRecoveryKey
 		}
-		if err := disk.SetPartitionType(r.Disk, 2, disk.GPTPartTypeLinuxRootX86_64); err != nil {
-			fatal("retagging root partition: %v", err)
+		mapperPath := ""
+		if hasEncryption {
+			mapperPath = luks.MapperPath(luksMapper)
 		}
-		// Remount root so finalization and post-install writes can proceed.
-		// udisksctl unmount (used by UnmountPartition above) removes the
-		// mountpoint directory it manages, and disk.Mount — unlike
-		// MountTmpfs/BindMount — does not create its target, so recreate it
-		// or the plain `mount` syscall below fails with ENOENT.
-		if err := os.MkdirAll(activeTargetMount, 0o755); err != nil {
-			fatal("recreating target mountpoint before remount: %v", err)
-		}
-		rootPart := disk.PartName(r.Disk, 2)
-		if err := disk.Mount(rootPart, activeTargetMount, ""); err != nil {
-			fatal("remounting root partition after retagging: %v", err)
+		if err := retagRoot(r.Disk, disk.PartName(r.Disk, 2), 2, mapperPath, passphrase, activeTargetMount); err != nil {
+			fatal("%v", err)
 		}
 		// Remount EFI so that Plymouth/LUKS arg writes land on the real ESP
 		// instead of the empty /boot/efi directory in the XFS root.
@@ -805,9 +861,14 @@ func main() {
 	// unlocks the LUKS container and maps it to /dev/mapper/root before
 	// mounting the root filesystem. bootc install to-filesystem only sees the
 	// open mapper device and never writes LUKS parameters itself.
+	//
+	// A sealed UKI is the exception: its command line is inside the signed PE
+	// and the retag above leaves systemd-gpt-auto-generator to open the
+	// container, so there is no entry to patch and none is needed.
 	if activeLuksUUID != "" {
-		n, err := post.EnsureLuksArgs(activeTargetMount, activeLuksUUID)
-		if err != nil {
+		if retagsRoot && post.HasUki(activeTargetMount) {
+			progress.Info("Root unlocks through GPT auto-discovery; the sealed UKI carries no BLS entry to patch")
+		} else if n, err := post.EnsureLuksArgs(activeTargetMount, activeLuksUUID); err != nil {
 			progress.Info(fmt.Sprintf("Warning: could not inject LUKS boot args: %v", err))
 		} else if n > 0 {
 			progress.Info(fmt.Sprintf("Injected rd.luks.name into %d boot entr%s", n, map[bool]string{true: "y", false: "ies"}[n == 1]))

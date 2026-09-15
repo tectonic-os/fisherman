@@ -103,6 +103,54 @@ func TestSetPartitionType(t *testing.T) {
 	}
 }
 
+// UnmountDevice is the release named for the node the kernel mounts. Under
+// LUKS that node is /dev/mapper/<name> and the raw partition carries no mount
+// at all, so the by-number form releases nothing and leaves the container
+// holding the partition open.
+func TestUnmountDevice_ReleasesTheMapperAndNotTheRawPartition(t *testing.T) {
+	rec := setupRecorder(t)
+
+	mounts := `/dev/vda2 /mnt/raw ext4 rw,relatime 0 0
+/dev/mapper/fisherman-root /mnt/target ext4 rw,relatime 0 0
+`
+	tmpfile, err := os.CreateTemp("", "mounts")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+	if _, err := tmpfile.WriteString(mounts); err != nil {
+		t.Fatalf("write mounts: %v", err)
+	}
+	tmpfile.Close()
+
+	oldPath := disk.GetProcMountsPath()
+	disk.SetProcMountsPath(tmpfile.Name())
+	defer disk.SetProcMountsPath(oldPath)
+
+	if err := disk.UnmountDevice("/dev/mapper/fisherman-root"); err != nil {
+		t.Fatalf("UnmountDevice: %v", err)
+	}
+
+	want := map[string][]string{
+		"udisksctl": {"unmount", "--no-user-interaction", "--block-device", "/dev/mapper/fisherman-root"},
+		"blockdev":  {"--flushbufs", "/dev/mapper/fisherman-root"},
+	}
+	found := map[string]bool{}
+	for _, call := range rec.calls {
+		if wantArgs, ok := want[call.name]; ok && equalSlice(call.args, wantArgs) {
+			found[call.name] = true
+		}
+		if strings.Contains(strings.Join(call.args, " "), "/dev/vda2") {
+			t.Errorf("the raw partition was touched: %s %v", call.name, call.args)
+		}
+	}
+	for name := range want {
+		if !found[name] {
+			t.Errorf("no %s call for the mapper in %v", name, rec.calls)
+		}
+	}
+}
+
 func TestUnmountPartition(t *testing.T) {
 	rec := setupRecorder(t)
 

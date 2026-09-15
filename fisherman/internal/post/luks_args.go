@@ -60,6 +60,24 @@ func EnsureLuksArgs(sysroot, luksUUID string) (int, error) {
 	return total, nil
 }
 
+// HasUki reports whether the installed system's ESP carries a sealed UKI. A
+// UKI boots through the command line inside its own signed PE and systemd-boot's
+// EFI/Linux discovery, so it has no BLS entry for EnsureLuksArgs to patch, and
+// an encrypted root under one unlocks through systemd-gpt-auto-generator
+// instead. `bootc install` places it under EFI/Linux/bootc/.
+func HasUki(sysroot string) bool {
+	dir := filepath.Join(sysroot, "boot", "efi", "EFI", "Linux")
+	for _, pattern := range []string{
+		filepath.Join(dir, "*.efi"),
+		filepath.Join(dir, "*", "*.efi"),
+	} {
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ensureArgInEntry adds arg to the options line of a BLS entry if not already
 // present. Returns true if the file was modified.
 func ensureArgInEntry(path, arg string) (bool, error) {
