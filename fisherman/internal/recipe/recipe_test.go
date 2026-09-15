@@ -17,6 +17,10 @@ func TestValidate(t *testing.T) {
 	if err := os.WriteFile(diskPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	dataPath := filepath.Join(dir, "fake-data-disk")
+	if err := os.WriteFile(dataPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name    string
@@ -214,6 +218,39 @@ func TestValidate(t *testing.T) {
 				VarDisk: &recipe.VarDiskSpec{},
 			},
 			wantErr: "varDisk.disk is required",
+		},
+		{
+			name: "valid encrypted varDisk size",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				Encryption: recipe.Encryption{Type: "luks-passphrase", Passphrase: "secret"},
+				VarDisk:    &recipe.VarDiskSpec{Size: "100GiB", Encrypt: true},
+			},
+		},
+		{
+			name: "valid encrypted varDisk disk",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				Encryption: recipe.Encryption{Type: "tpm2-luks"},
+				VarDisk:    &recipe.VarDiskSpec{Disk: dataPath, Encrypt: true},
+			},
+		},
+		{
+			name: "encrypted varDisk without root encryption",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				VarDisk: &recipe.VarDiskSpec{Size: "100GiB", Encrypt: true},
+			},
+			wantErr: "requires encryption.type",
+		},
+		{
+			name: "encrypted varDisk that keeps an existing filesystem",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "ext4", Hostname: "h",
+				Encryption: recipe.Encryption{Type: "luks-passphrase", Passphrase: "secret"},
+				VarDisk:    &recipe.VarDiskSpec{Disk: dataPath, KeepExisting: true, Encrypt: true},
+			},
+			wantErr: "cannot be set with varDisk.keepExisting",
 		},
 
 		// ── Invalid: hostname ─────────────────────────────────────────────────

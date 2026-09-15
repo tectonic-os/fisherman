@@ -24,17 +24,21 @@ var Exec runner.Executor = runner.DefaultExecutor
 // Normally set to os.RemoveAll, but tests can replace it.
 var RemoveAllFn = os.RemoveAll
 
-// Cleanup tracks mounted filesystems and an open LUKS device so they can be
+// Cleanup tracks mounted filesystems and open LUKS devices so they can be
 // torn down in the correct order on both success and error paths.
 type Cleanup struct {
 	mounts       []string
 	postRemovals []string
-	luksMapper   string
+	luksMappers  []string
 	done         bool
 }
 
 func (c *Cleanup) AddMount(path string) { c.mounts = append(c.mounts, path) }
-func (c *Cleanup) SetLUKS(name string)  { c.luksMapper = name }
+
+// SetLUKS registers the root container's mapper. AddLUKS registers another
+// one, such as a separate encrypted /var: both are closed, newest first.
+func (c *Cleanup) SetLUKS(name string) { c.luksMappers = []string{name} }
+func (c *Cleanup) AddLUKS(name string) { c.luksMappers = append(c.luksMappers, name) }
 
 // AddPostRemoval registers a path to be removed after all unmounts and the
 // LUKS device close have completed. Use this for scratch directories whose
@@ -63,24 +67,25 @@ func (c *Cleanup) Run() {
 			fmt.Fprintf(os.Stderr, "warning: unmounting %s: %v\n", mp, err)
 		}
 	}
-	if c.luksMapper != "" {
-		// Before closing LUKS device, flush pending I/O and release device references
-		// to prevent "Device or resource busy" errors. Mirrors the strategy in
-		// internal/disk/partition.go:unmountAll().
+	for i := len(c.luksMappers) - 1; i >= 0; i-- {
+		mapper := c.luksMappers[i]
+		// Before closing a LUKS device, flush pending I/O and release device
+		// references to prevent "Device or resource busy" errors. Mirrors the
+		// strategy in internal/disk/partition.go:unmountAll().
 
 		// Kill any processes still holding file descriptors on the LUKS device.
 		// fuser exits non-zero when no processes are found — that is fine.
-		_ = runner.Run("fuser", "-km", luks.MapperPath(c.luksMapper))
+		_ = runner.Run("fuser", "-km", luks.MapperPath(mapper))
 
 		// Flush pending I/O so the kernel can drop its internal references.
-		_ = runner.Run("blockdev", "--flushbufs", luks.MapperPath(c.luksMapper))
+		_ = runner.Run("blockdev", "--flushbufs", luks.MapperPath(mapper))
 
 		// Give udev and udisksd time to release all device references.
 		_ = runner.Run("udevadm", "settle")
 
 		// Now close the LUKS device.
-		if err := luks.Close(c.luksMapper); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: closing LUKS device %s: %v\n", c.luksMapper, err)
+		if err := luks.Close(mapper); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: closing LUKS device %s: %v\n", mapper, err)
 		}
 	}
 	// Post-removals run last so any path that was bind-mounted into the target
@@ -703,19 +708,9 @@ func EnablePrintServices(target string) {
 // AppendFstabEntry appends an fstab entry to the installed system at target.
 // Works for both composefs-native and ostree-based deployments.
 func AppendFstabEntry(target, uuid, mountpoint, fstype, options string) error {
-	var etcDir string
-	if isComposeFsNative(target) {
-		var err error
-		etcDir, err = ComposeFsDeployEtcDirFn(target)
-		if err != nil {
-			return fmt.Errorf("finding composefs deploy etc for fstab: %w", err)
-		}
-	} else {
-		deployDir, err := DeploymentDirFn(target)
-		if err != nil {
-			return fmt.Errorf("finding deployment dir for fstab: %w", err)
-		}
-		etcDir = filepath.Join(deployDir, "etc")
+	etcDir, err := deployEtcDir(target)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(etcDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", etcDir, err)
@@ -733,5 +728,71 @@ func AppendFstabEntry(target, uuid, mountpoint, fstype, options string) error {
 	if _, err := f.WriteString(entry); err != nil {
 		return fmt.Errorf("writing fstab entry: %w", err)
 	}
+	return nil
+}
+
+// deployEtcDir is the installed system's own /etc: the deployment's for both
+// backends, because a plain write to the physical root's /etc would not be the
+// directory the booted system reads.
+func deployEtcDir(target string) (string, error) {
+	if isComposeFsNative(target) {
+		etcDir, err := ComposeFsDeployEtcDirFn(target)
+		if err != nil {
+			return "", fmt.Errorf("finding composefs deploy etc: %w", err)
+		}
+		return etcDir, nil
+	}
+	deployDir, err := DeploymentDirFn(target)
+	if err != nil {
+		return "", fmt.Errorf("finding deployment dir: %w", err)
+	}
+	return filepath.Join(deployDir, "etc"), nil
+}
+
+// InstallVarCrypt makes the installed system open a /var container by itself:
+// the key file the container's second slot was given the key for, and the
+// crypttab line that names it. The root's passphrase still opens the container,
+// so a reinstall can read it before this file exists. /var is not in the
+// initrd, so systemd opens it from the host system's /etc/crypttab.
+func InstallVarCrypt(target, name, luksUUID string, key []byte) error {
+	if luksUUID == "" {
+		return fmt.Errorf("installing the %s key file needs the container's LUKS UUID", name)
+	}
+	etcDir, err := deployEtcDir(target)
+	if err != nil {
+		return err
+	}
+	keyDir := filepath.Join(etcDir, "cryptsetup-keys.d")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", keyDir, err)
+	}
+	keyPath := filepath.Join(keyDir, name+".key")
+	keyFile, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("opening key file %s: %w", keyPath, err)
+	}
+	if _, err := keyFile.Write(key); err != nil {
+		keyFile.Close()
+		return fmt.Errorf("writing key file %s: %w", keyPath, err)
+	}
+	if err := keyFile.Close(); err != nil {
+		return fmt.Errorf("closing key file %s: %w", keyPath, err)
+	}
+
+	// A retried install may have written a line for this name already; the
+	// name is the first field, which is what systemd keys the volume by.
+	crypttabPath := filepath.Join(etcDir, "crypttab")
+	held, _ := os.ReadFile(crypttabPath)
+	lines := []string{}
+	for _, line := range strings.Split(strings.TrimRight(string(held), "\n"), "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] != name {
+			lines = append(lines, line)
+		}
+	}
+	lines = append(lines, fmt.Sprintf("%s UUID=%s /etc/cryptsetup-keys.d/%s.key luks", name, luksUUID, name))
+	if err := os.WriteFile(crypttabPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return fmt.Errorf("writing crypttab %s: %w", crypttabPath, err)
+	}
+	fmt.Fprintf(os.Stdout, "  wrote /etc/cryptsetup-keys.d/%s.key and its crypttab entry\n", name)
 	return nil
 }

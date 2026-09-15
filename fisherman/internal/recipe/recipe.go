@@ -129,6 +129,13 @@ type VarDiskSpec struct {
 	Disk         string `json:"disk"`           // block device, e.g. "/dev/sdb"
 	Size         string `json:"size,omitempty"` // sfdisk size, e.g. "100GiB"; cuts /var out of the install disk
 	KeepExisting bool   `json:"keepExisting"`   // if true, mount as-is; if false, format XFS
+	// Encrypt wraps the new /var in a LUKS container of its own before it is
+	// formatted. It gets two slots: the root's passphrase (the same passphrase
+	// in both headers, so a reinstall can open it) and a key file the installed
+	// system reads at boot. Requires encryption.type, because the passphrase
+	// that opens both containers is the root's, and the auto-partitioning path,
+	// because a container has to be created before it can be mounted.
+	Encrypt bool `json:"encrypt,omitempty"`
 }
 
 // isSupportedMountFstype reports whether a customMount fstype is one
@@ -282,6 +289,14 @@ func (r *Recipe) Validate() error {
 			}
 			if r.VarDisk.Disk == r.Disk {
 				return fmt.Errorf("varDisk.disk must differ from the system disk")
+			}
+		}
+		if r.VarDisk.Encrypt {
+			if r.Encryption.Type == "" || r.Encryption.Type == "none" {
+				return fmt.Errorf("varDisk.encrypt requires encryption.type: the passphrase that opens /var is the root's")
+			}
+			if r.VarDisk.KeepExisting {
+				return fmt.Errorf("varDisk.encrypt cannot be set with varDisk.keepExisting: a filesystem that is kept is not re-encrypted")
 			}
 		}
 	}

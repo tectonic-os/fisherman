@@ -1027,3 +1027,74 @@ func TestHasUki(t *testing.T) {
 		}
 	})
 }
+
+func TestInstallVarCrypt_WritesKeyAndCrypttab(t *testing.T) {
+	sysroot := t.TempDir()
+	deployDir := filepath.Join(sysroot, "ostree", "deploy", "default", "deploy", "abc123.0")
+	if err := os.MkdirAll(deployDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origDeploy := post.DeploymentDirFn
+	defer func() { post.DeploymentDirFn = origDeploy }()
+	post.DeploymentDirFn = func(string) (string, error) { return deployDir, nil }
+
+	// Only the ostree path answers: `ls state/deploy` must fail for the
+	// backend probe to take the ostree branch.
+	origRun := runner.RunFn
+	defer func() { runner.RunFn = origRun }()
+	runner.RunFn = func(_ io.Reader, name string, args ...string) error {
+		if strings.Contains(name+" "+strings.Join(args, " "), "ostree") {
+			return nil
+		}
+		return fmt.Errorf("absent")
+	}
+
+	key := []byte("00112233445566778899aabbccddeeff")
+	if err := post.InstallVarCrypt(sysroot, "var", "1111-2222", key); err != nil {
+		t.Fatalf("InstallVarCrypt: %v", err)
+	}
+
+	keyPath := filepath.Join(deployDir, "etc", "cryptsetup-keys.d", "var.key")
+	got, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("reading the key file: %v", err)
+	}
+	if string(got) != string(key) {
+		t.Errorf("key file = %q, want %q", got, key)
+	}
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("key file mode = %o, want 600", info.Mode().Perm())
+	}
+
+	crypttabPath := filepath.Join(deployDir, "etc", "crypttab")
+	crypttab, err := os.ReadFile(crypttabPath)
+	if err != nil {
+		t.Fatalf("reading crypttab: %v", err)
+	}
+	want := "var UUID=1111-2222 /etc/cryptsetup-keys.d/var.key luks\n"
+	if string(crypttab) != want {
+		t.Errorf("crypttab = %q, want %q", crypttab, want)
+	}
+
+	// A retried install keeps another volume's line and replaces its own.
+	pre := "other UUID=9999 /key luks\nvar UUID=stale /old/key luks\n"
+	if err := os.WriteFile(crypttabPath, []byte(pre), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := post.InstallVarCrypt(sysroot, "var", "1111-2222", key); err != nil {
+		t.Fatalf("InstallVarCrypt (retry): %v", err)
+	}
+	crypttab, err = os.ReadFile(crypttabPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "other UUID=9999 /key luks\nvar UUID=1111-2222 /etc/cryptsetup-keys.d/var.key luks\n"
+	if string(crypttab) != want {
+		t.Errorf("crypttab after retry = %q, want %q", crypttab, want)
+	}
+}

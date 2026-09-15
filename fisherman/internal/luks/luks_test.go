@@ -3,6 +3,7 @@ package luks_test
 import (
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -102,6 +103,67 @@ func TestOpen(t *testing.T) {
 		if strings.Contains(arg, pass) {
 			t.Errorf("passphrase leaked into argv: %q", arg)
 		}
+	}
+}
+
+func TestAddKey(t *testing.T) {
+	const part = "/dev/sda4"
+	const existing = "hunter2"
+	const newKey = "0123456789abcdef"
+
+	origRunFn := runner.RunFn
+	defer func() { runner.RunFn = origRunFn }()
+	var (
+		calls     int
+		name      string
+		args      []string
+		stdin     string
+		keyOnDisk string
+		keyPath   string
+	)
+	runner.RunFn = func(in io.Reader, n string, a ...string) error {
+		calls++
+		name = n
+		args = a
+		b, _ := io.ReadAll(in)
+		stdin = string(b)
+		keyPath = a[len(a)-1]
+		data, err := os.ReadFile(keyPath)
+		if err != nil {
+			t.Errorf("reading the new key file %s: %v", keyPath, err)
+		}
+		keyOnDisk = string(data)
+		return nil
+	}
+
+	if err := luks.AddKey(part, existing, newKey); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
+	if name != "cryptsetup" {
+		t.Errorf("name = %q, want cryptsetup", name)
+	}
+	if stdin != existing {
+		t.Errorf("stdin = %q, want the existing key", stdin)
+	}
+	wantArgs := []string{"luksAddKey", "--key-file=-", part, keyPath}
+	if !equalSlice(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+	if keyOnDisk != newKey {
+		t.Errorf("new key file = %q, want %q", keyOnDisk, newKey)
+	}
+	// Neither key may reach the process table, and the new key's temp file is
+	// gone once the call returns.
+	for _, arg := range args {
+		if strings.Contains(arg, existing) || strings.Contains(arg, newKey) {
+			t.Errorf("a key leaked into argv: %q", arg)
+		}
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("new key temp file %s survived AddKey: %v", keyPath, err)
 	}
 }
 

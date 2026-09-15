@@ -51,6 +51,31 @@ func Open(partition, passphrase, mapperName string) error {
 	)
 }
 
+// AddKey adds newKey to an existing container as another key slot,
+// authenticating with existingKey. The new key goes through a temp file
+// because cryptsetup takes it by path, and stdin is already the existing key.
+func AddKey(partition, existingKey, newKey string) error {
+	f, err := os.CreateTemp("", "fisherman-luks-newkey-*")
+	if err != nil {
+		return fmt.Errorf("creating temp key file: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(newKey); err != nil {
+		f.Close()
+		return fmt.Errorf("writing temp key file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing temp key file: %w", err)
+	}
+	return runner.RunWithStdin(
+		strings.NewReader(existingKey),
+		"cryptsetup", "luksAddKey",
+		"--key-file=-",
+		partition,
+		f.Name(),
+	)
+}
+
 // Close closes the LUKS device identified by mapperName.
 func Close(mapperName string) error {
 	return runner.Run("cryptsetup", "luksClose", mapperName)
