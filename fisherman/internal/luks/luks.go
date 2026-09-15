@@ -51,29 +51,38 @@ func Open(partition, passphrase, mapperName string) error {
 	)
 }
 
-// AddKey adds newKey to an existing container as another key slot,
-// authenticating with existingKey. The new key goes through a temp file
-// because cryptsetup takes it by path, and stdin is already the existing key.
-func AddKey(partition, existingKey, newKey string) error {
-	f, err := os.CreateTemp("", "fisherman-luks-newkey-*")
+// withTempKeyFile writes key to a fresh 0600 file, runs fn with its path, and
+// removes it. cryptsetup takes a key by path, and a key this package handles
+// must not reach argv or a wider permission a moment before it is needed.
+func withTempKeyFile(key string, fn func(path string) error) error {
+	f, err := os.CreateTemp("", "fisherman-luks-key-*")
 	if err != nil {
 		return fmt.Errorf("creating temp key file: %w", err)
 	}
 	defer os.Remove(f.Name())
-	if _, err := f.WriteString(newKey); err != nil {
+	if _, err := f.WriteString(key); err != nil {
 		f.Close()
 		return fmt.Errorf("writing temp key file: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("closing temp key file: %w", err)
 	}
-	return runner.RunWithStdin(
-		strings.NewReader(existingKey),
-		"cryptsetup", "luksAddKey",
-		"--key-file=-",
-		partition,
-		f.Name(),
-	)
+	return fn(f.Name())
+}
+
+// AddKey adds newKey to an existing container as another key slot,
+// authenticating with existingKey. The new key goes through a temp file
+// because cryptsetup takes it by path, and stdin is already the existing key.
+func AddKey(partition, existingKey, newKey string) error {
+	return withTempKeyFile(newKey, func(path string) error {
+		return runner.RunWithStdin(
+			strings.NewReader(existingKey),
+			"cryptsetup", "luksAddKey",
+			"--key-file=-",
+			partition,
+			path,
+		)
+	})
 }
 
 // Close closes the LUKS device identified by mapperName.
@@ -105,25 +114,15 @@ func UUID(partition string) string {
 // directory (/var/roothome when running under pkexec), which fails when that
 // path does not exist. A temp file avoids this root home lookup entirely.
 func EnrollTPM2(partition, passphrase string) error {
-	f, err := os.CreateTemp("", "fisherman-luks-key-*")
-	if err != nil {
-		return fmt.Errorf("creating temp key file: %w", err)
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.WriteString(passphrase); err != nil {
-		f.Close()
-		return fmt.Errorf("writing temp key file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing temp key file: %w", err)
-	}
-	return runner.Run(
-		"systemd-cryptenroll",
-		"--tpm2-device=auto",
-		"--tpm2-pcrs=7",
-		fmt.Sprintf("--unlock-key-file=%s", f.Name()),
-		partition,
-	)
+	return withTempKeyFile(passphrase, func(path string) error {
+		return runner.Run(
+			"systemd-cryptenroll",
+			"--tpm2-device=auto",
+			"--tpm2-pcrs=7",
+			fmt.Sprintf("--unlock-key-file=%s", path),
+			partition,
+		)
+	})
 }
 
 // StageFirstBootEnrollment installs a oneshot into the target that enrolls

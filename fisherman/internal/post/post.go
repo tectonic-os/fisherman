@@ -780,9 +780,14 @@ func InstallVarCrypt(target, name, luksUUID string, key []byte) error {
 	}
 
 	// A retried install may have written a line for this name already; the
-	// name is the first field, which is what systemd keys the volume by.
+	// name is the first field, which is what systemd keys the volume by. An
+	// unreadable crypttab is an error and not an empty one: replacing it would
+	// drop another volume's line.
 	crypttabPath := filepath.Join(etcDir, "crypttab")
-	held, _ := os.ReadFile(crypttabPath)
+	held, err := os.ReadFile(crypttabPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading crypttab %s: %w", crypttabPath, err)
+	}
 	lines := []string{}
 	for _, line := range strings.Split(strings.TrimRight(string(held), "\n"), "\n") {
 		if fields := strings.Fields(line); len(fields) > 0 && fields[0] != name {

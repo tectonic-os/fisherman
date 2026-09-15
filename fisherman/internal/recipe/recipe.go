@@ -295,6 +295,9 @@ func (r *Recipe) Validate() error {
 			if r.Encryption.Type == "" || r.Encryption.Type == "none" {
 				return fmt.Errorf("varDisk.encrypt requires encryption.type: the passphrase that opens /var is the root's")
 			}
+			if len(r.CustomMounts) > 0 {
+				return fmt.Errorf("varDisk.encrypt requires the auto-partitioning path: a manual layout has no root passphrase to open /var with")
+			}
 			if r.VarDisk.KeepExisting {
 				return fmt.Errorf("varDisk.encrypt cannot be set with varDisk.keepExisting: a filesystem that is kept is not re-encrypted")
 			}

@@ -21,7 +21,6 @@ import (
 const (
 	defaultTargetMount = "/mnt/fisherman-target"
 	defaultLuksMapper  = "fisherman-root"
-	varMapper          = "fisherman-var"
 )
 
 // These are resolved from the recipe in main(); package-level vars rather than
@@ -669,11 +668,16 @@ func main() {
 
 			// The same passphrase in both headers: a reinstall that keeps the
 			// data disk can open it before any key file exists, and one thing
-			// is asked of the person.
+			// is asked of the person. Only the auto path has a root
+			// passphrase, which validation refuses an encrypted /var without.
+			if rootPassphrase == "" {
+				fatal("encrypting /var needs the root's passphrase, and this install path has none")
+			}
 			key := []byte(luks.RandomPassphrase())
-			if _, err := os.Stat(luks.MapperPath(varMapper)); err == nil {
-				progress.Info(fmt.Sprintf("Closing stale mapper %s from previous run", varMapper))
-				_ = luks.Close(varMapper)
+			varMapperName := luksMapper + "-var"
+			if _, err := os.Stat(luks.MapperPath(varMapperName)); err == nil {
+				progress.Info(fmt.Sprintf("Closing stale mapper %s from previous run", varMapperName))
+				_ = luks.Close(varMapperName)
 			}
 			if err := luks.Format(r.VarDisk.Disk, rootPassphrase); err != nil {
 				fatal("LUKS format of the /var disk: %v", err)
@@ -681,16 +685,16 @@ func main() {
 			if err := luks.AddKey(r.VarDisk.Disk, rootPassphrase, string(key)); err != nil {
 				fatal("adding the /var key file slot: %v", err)
 			}
-			if err := luks.Open(r.VarDisk.Disk, string(key), varMapper); err != nil {
+			if err := luks.Open(r.VarDisk.Disk, string(key), varMapperName); err != nil {
 				fatal("LUKS open of the /var disk: %v", err)
 			}
-			cleanup.AddLUKS(varMapper)
+			cleanup.AddLUKS(varMapperName)
 			varLuksUUID = luks.UUID(r.VarDisk.Disk)
 			if varLuksUUID == "" {
 				fatal("reading the /var container's LUKS UUID: cryptsetup luksUUID said nothing")
 			}
 			varKey = key
-			activeVarMount = luks.MapperPath(varMapper)
+			activeVarMount = luks.MapperPath(varMapperName)
 			if err := disk.FormatVar(activeVarMount); err != nil {
 				fatal("formatting /var disk: %v", err)
 			}
@@ -808,10 +812,7 @@ func main() {
 		// Release kernel and userspace references to the root before modifying
 		// its GPT type. bootc install may have left active references. The
 		// container is opened again with the same key it was formatted with.
-		passphrase := r.Encryption.Passphrase
-		if r.Encryption.Type == "tpm2-luks" {
-			passphrase = luksRecoveryKey
-		}
+		passphrase := rootPassphrase
 		mapperPath := ""
 		if hasEncryption {
 			mapperPath = luks.MapperPath(luksMapper)
@@ -844,10 +845,7 @@ func main() {
 		pi++
 		step++
 
-		unlockPassphrase := r.Encryption.Passphrase
-		if r.Encryption.Type == "tpm2-luks" {
-			unlockPassphrase = luksRecoveryKey
-		}
+		unlockPassphrase := rootPassphrase
 		// Enroll TPM2 on the FIRST BOOT of the installed system, not here:
 		// --tpm2-pcrs=7 seals against PCR 7 as measured in the live
 		// installer, but the installed system boots a different chain and
@@ -893,6 +891,11 @@ func main() {
 	if hasVarDisk {
 		varUUID := disk.UUID(activeVarMount)
 		if varUUID == "" {
+			// An encrypted /var with no filesystem UUID would be opened at
+			// boot and mounted nowhere, so the pair fails together.
+			if varLuksUUID != "" {
+				fatal("reading the /var filesystem UUID: blkid said nothing, and the machine would open a container nothing mounts")
+			}
 			progress.Info(fmt.Sprintf("Warning: could not determine UUID for /var disk %s — skipping fstab entry", activeVarMount))
 		} else {
 			if err := post.AppendFstabEntry(activeTargetMount, varUUID, "/var", "xfs", "defaults"); err != nil {

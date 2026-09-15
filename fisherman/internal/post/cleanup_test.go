@@ -274,3 +274,59 @@ func TestCleanup_NoLUKS(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanup_AddLUKSClosesEveryMapper verifies that a root container and a
+// separate /var one are both closed, newest first, so /var is released before
+// the root it sits on.
+func TestCleanup_AddLUKSClosesEveryMapper(t *testing.T) {
+	rec := setupRecorder(t)
+
+	var c post.Cleanup
+	c.SetLUKS("fisherman-root")
+	c.AddLUKS("fisherman-var")
+	c.Run()
+
+	var closes []string
+	for _, call := range rec.calls {
+		if call.name == "cryptsetup" {
+			closes = append(closes, call.args[1])
+		}
+	}
+	want := []string{"fisherman-var", "fisherman-root"}
+	if len(closes) != len(want) {
+		t.Fatalf("closed %v, want %v", closes, want)
+	}
+	for i := range want {
+		if closes[i] != want[i] {
+			t.Errorf("close[%d] = %q, want %q", i, closes[i], want[i])
+		}
+	}
+}
+
+// TestCleanup_SetLUKSReplaces verifies the root registration replaces rather
+// than accumulates, while AddLUKS adds beside it.
+func TestCleanup_SetLUKSReplaces(t *testing.T) {
+	rec := setupRecorder(t)
+
+	var c post.Cleanup
+	c.SetLUKS("first")
+	c.SetLUKS("second")
+	c.AddLUKS("third")
+	c.Run()
+
+	var closes []string
+	for _, call := range rec.calls {
+		if call.name == "cryptsetup" {
+			closes = append(closes, call.args[1])
+		}
+	}
+	want := []string{"third", "second"}
+	if len(closes) != len(want) {
+		t.Fatalf("closed %v, want %v", closes, want)
+	}
+	for i := range want {
+		if closes[i] != want[i] {
+			t.Errorf("close[%d] = %q, want %q", i, closes[i], want[i])
+		}
+	}
+}
