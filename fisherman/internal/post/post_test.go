@@ -975,3 +975,55 @@ func TestCopyFlatpaks_RemovesInstallerApps_CustomFlatpakVarPath(t *testing.T) {
 		t.Errorf("installer app dir still exists at custom flatpakVarPath: %s", appDir)
 	}
 }
+
+// A UKI on the ESP is what makes EnsureLuksArgs's job unnecessary: bootc
+// installs it under EFI/Linux/bootc/ and none may exist under other names.
+func TestHasUki(t *testing.T) {
+	t.Run("bootc's own directory is a UKI", func(t *testing.T) {
+		dir := t.TempDir()
+		ukiDir := dir + "/boot/efi/EFI/Linux/bootc"
+		if err := os.MkdirAll(ukiDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ukiDir+"/fedora-44.efi", []byte("uki"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !post.HasUki(dir) {
+			t.Error("HasUki: a UKI under EFI/Linux/bootc was not found")
+		}
+	})
+
+	t.Run("a directly placed UKI counts too", func(t *testing.T) {
+		dir := t.TempDir()
+		ukiDir := dir + "/boot/efi/EFI/Linux"
+		if err := os.MkdirAll(ukiDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ukiDir+"/one.efi", []byte("uki"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !post.HasUki(dir) {
+			t.Error("HasUki: a UKI directly under EFI/Linux was not found")
+		}
+	})
+
+	t.Run("loader entries are not a UKI", func(t *testing.T) {
+		dir := t.TempDir()
+		entries := dir + "/boot/efi/loader/entries"
+		if err := os.MkdirAll(entries, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(entries+"/entry.conf", []byte("title x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if post.HasUki(dir) {
+			t.Error("HasUki: a BLS entry was read as a UKI")
+		}
+	})
+
+	t.Run("no ESP at all is not a UKI", func(t *testing.T) {
+		if post.HasUki(t.TempDir()) {
+			t.Error("HasUki: an empty root was read as a UKI")
+		}
+	})
+}

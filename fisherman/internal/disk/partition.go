@@ -48,44 +48,56 @@ func PartName(disk string, num int) string {
 // destructive than unmountAll() — it only affects the specific partition, not the
 // entire disk. It does NOT deactivate LVM or kill processes.
 func UnmountPartition(disk string, partNum int) error {
-	partPath := PartName(disk, partNum)
+	return UnmountDevice(PartName(disk, partNum))
+}
+
+// UnmountDevice releases kernel and userspace references to one device in
+// preparation for modifying the partition table it sits on: every mount in
+// /proc/mounts naming it, then a flush and a settle.
+//
+// The device may be a partition or the /dev/mapper node a dm-crypt container
+// over one presents, because that is the name the kernel mounts under and
+// the name /proc/mounts carries. Under LUKS, releasing the raw partition by
+// number finds no mount at all and leaves the container holding it open while
+// sfdisk rewrites the table.
+func UnmountDevice(dev string) error {
 	data, err := os.ReadFile(procMountsPath)
 	if err != nil {
 		return fmt.Errorf("reading /proc/mounts: %w", err)
 	}
 
-	// Find and unmount any mounts for this specific partition.
+	// Find and unmount any mounts for this specific device.
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
-		dev := fields[0]
+		mounted := fields[0]
 		mp := fields[1]
 
-		// Only process mounts for this specific partition.
-		if dev != partPath {
+		// Only process mounts for this specific device.
+		if mounted != dev {
 			continue
 		}
 
 		// swap entries have mount point "none" and fstype "swap".
 		if mp == "none" || (len(fields) >= 3 && fields[2] == "swap") {
-			fmt.Fprintf(os.Stdout, "+ swapoff %s\n", dev)
-			_ = runner.Run("swapoff", dev)
+			fmt.Fprintf(os.Stdout, "+ swapoff %s\n", mounted)
+			_ = runner.Run("swapoff", mounted)
 			continue
 		}
 
-		fmt.Fprintf(os.Stdout, "+ unmount %s (%s)\n", mp, dev)
+		fmt.Fprintf(os.Stdout, "+ unmount %s (%s)\n", mp, mounted)
 		// Try udisksctl first — properly releases udisksd's open FD.
-		if err := runner.Run("udisksctl", "unmount", "--no-user-interaction", "--block-device", dev); err != nil {
+		if err := runner.Run("udisksctl", "unmount", "--no-user-interaction", "--block-device", mounted); err != nil {
 			// Fall back to umount -l for mounts not managed by udisks.
 			_ = runner.Run("umount", "-l", mp)
 		}
 	}
 
 	// Flush pending I/O so the kernel can drop its internal references.
-	fmt.Fprintf(os.Stdout, "+ blockdev --flushbufs %s\n", partPath)
-	_ = runner.Run("blockdev", "--flushbufs", partPath)
+	fmt.Fprintf(os.Stdout, "+ blockdev --flushbufs %s\n", dev)
+	_ = runner.Run("blockdev", "--flushbufs", dev)
 
 	// Give udev and udisksd time to release all device references.
 	fmt.Fprintf(os.Stdout, "+ udevadm settle\n")
