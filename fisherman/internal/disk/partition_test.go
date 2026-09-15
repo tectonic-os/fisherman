@@ -195,7 +195,7 @@ func TestPartition_SfdiskScript(t *testing.T) {
 	rec := setupRecorder(t)
 
 	// /dev/sda: doesn't start with "loop", so loopRescan won't be called.
-	if err := disk.Partition("/dev/sda"); err != nil {
+	if err := disk.Partition("/dev/sda", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 
@@ -240,19 +240,66 @@ func TestPartition_SfdiskScript(t *testing.T) {
 	}
 }
 
+// TestPartition_VarSize verifies that a /var size inserts a sized var
+// partition ahead of the root, which still fills what is left.
+func TestPartition_VarSize(t *testing.T) {
+	rec := setupRecorder(t)
+
+	if err := disk.Partition("/dev/sda", "100GiB"); err != nil {
+		t.Fatalf("Partition: %v", err)
+	}
+
+	partLines := partitionLines(sfdiskStdin(t, rec))
+	if len(partLines) != 4 {
+		t.Fatalf("expected 4 partition lines with a /var size, got %d:\n%v", len(partLines), partLines)
+	}
+	if !strings.Contains(partLines[2], `size=100GiB`) || !strings.Contains(partLines[2], `name="var"`) {
+		t.Errorf("/var partition not found ahead of the root: %q", partLines[2])
+	}
+	if strings.Contains(partLines[3], "size=") || !strings.Contains(partLines[3], `name="root"`) {
+		t.Errorf("root must come last with no size=, got: %q", partLines[3])
+	}
+
+	recSD := setupRecorder(t)
+	if err := disk.PartitionSystemdBoot("/dev/sda", "100GiB"); err != nil {
+		t.Fatalf("PartitionSystemdBoot: %v", err)
+	}
+	sdLines := partitionLines(sfdiskStdin(t, recSD))
+	if len(sdLines) != 3 {
+		t.Fatalf("expected 3 partition lines with a /var size, got %d:\n%v", len(sdLines), sdLines)
+	}
+	if !strings.Contains(sdLines[1], `name="var"`) || !strings.Contains(sdLines[2], `name="root"`) {
+		t.Errorf("expected var then root, got: %q, %q", sdLines[1], sdLines[2])
+	}
+}
+
+// partitionLines returns the partition lines of an sfdisk script, dropping the
+// label and blank lines.
+func partitionLines(script string) []string {
+	var out []string
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "label:") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
 // TestPartitionEncrypted_SameLayout verifies that PartitionEncrypted produces
 // the identical 3-partition sfdisk script as Partition. Both encrypted and
 // unencrypted installs share the same disk layout; only LUKS setup differs.
 func TestPartitionEncrypted_SameLayout(t *testing.T) {
 	recPlain := setupRecorder(t)
-	if err := disk.Partition("/dev/sda"); err != nil {
+	if err := disk.Partition("/dev/sda", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 	plainScript := sfdiskStdin(t, recPlain)
 
 	// Reset recorder for the encrypted call.
 	recEnc := setupRecorder(t)
-	if err := disk.PartitionEncrypted("/dev/sda"); err != nil {
+	if err := disk.PartitionEncrypted("/dev/sda", ""); err != nil {
 		t.Fatalf("PartitionEncrypted: %v", err)
 	}
 	encScript := sfdiskStdin(t, recEnc)
@@ -269,7 +316,7 @@ func TestPartitionEncrypted_SameLayout(t *testing.T) {
 func TestPartitionSystemdBoot_SfdiskScript(t *testing.T) {
 	rec := setupRecorder(t)
 
-	if err := disk.PartitionSystemdBoot("/dev/nvme0n1"); err != nil {
+	if err := disk.PartitionSystemdBoot("/dev/nvme0n1", ""); err != nil {
 		t.Fatalf("PartitionSystemdBoot: %v", err)
 	}
 
@@ -310,7 +357,7 @@ func TestPartitionSystemdBoot_SfdiskScript(t *testing.T) {
 // TestPartition_SfdiskArgs verifies the command-line arguments passed to sfdisk.
 func TestPartition_SfdiskArgs(t *testing.T) {
 	rec := setupRecorder(t)
-	if err := disk.Partition("/dev/sda"); err != nil {
+	if err := disk.Partition("/dev/sda", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 
@@ -367,7 +414,7 @@ func TestUnmountAll_AutomountedDisk(t *testing.T) {
 
 	rec := setupRecorder(t)
 
-	if err := disk.Partition("/dev/sda"); err != nil {
+	if err := disk.Partition("/dev/sda", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 
@@ -442,7 +489,7 @@ func TestUnmountAll_NBDSkipsFuser(t *testing.T) {
 
 	rec := setupRecorder(t)
 
-	if err := disk.Partition("/dev/nbd0"); err != nil {
+	if err := disk.Partition("/dev/nbd0", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 
@@ -479,7 +526,7 @@ func TestUnmountAll_NoMounts(t *testing.T) {
 
 	rec := setupRecorder(t)
 
-	if err := disk.Partition("/dev/sda"); err != nil {
+	if err := disk.Partition("/dev/sda", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 
@@ -536,7 +583,7 @@ func TestPartition_PartprobeAfterForceReread(t *testing.T) {
 	runner.RunFn = rec.run
 	t.Cleanup(func() { runner.RunFn = runner.DefaultRun })
 
-	if err := disk.Partition("/dev/sda"); err != nil {
+	if err := disk.Partition("/dev/sda", ""); err != nil {
 		t.Fatalf("Partition: %v", err)
 	}
 

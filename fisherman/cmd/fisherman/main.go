@@ -385,6 +385,7 @@ func main() {
 	var activeTargetMount string
 	var activeEfiPart string
 	var activeRootPart string  // only used for TPM2 enrolment, empty in manual mode
+	var activeRootPartNum int  // GPT number of the root partition, 0 in manual mode
 	var activeLuksUUID string  // LUKS partition UUID for boot entry injection; empty if no encryption
 	var luksRecoveryKey string // random passphrase for tpm2-luks (emitted as recovery key)
 
@@ -418,42 +419,55 @@ func main() {
 		pi++
 		step++
 
+		// A varDisk carrying a size is cut out of this disk, ahead of the root.
+		varSize := ""
+		if r.VarDisk != nil {
+			varSize = r.VarDisk.Size
+		}
+
 		if r.Filesystem == "zfs" {
 			if err := disk.PartitionZFS(r.Disk); err != nil {
 				fatal("partitioning disk for ZFS: %v", err)
 			}
 		} else if isSystemdBoot {
 			// systemd-boot always uses a 2-partition layout regardless of encryption.
-			// LUKS (if requested) wraps p2 (root); the 1 GiB FAT32 ESP stays unencrypted.
-			if err := disk.PartitionSystemdBoot(r.Disk); err != nil {
+			// LUKS (if requested) wraps the root; the FAT32 ESP stays unencrypted.
+			if err := disk.PartitionSystemdBoot(r.Disk, varSize); err != nil {
 				fatal("partitioning disk: %v", err)
 			}
 		} else if hasEncryption {
-			if err := disk.PartitionEncrypted(r.Disk); err != nil {
+			if err := disk.PartitionEncrypted(r.Disk, varSize); err != nil {
 				fatal("partitioning disk: %v", err)
 			}
 		} else {
-			if err := disk.Partition(r.Disk); err != nil {
+			if err := disk.Partition(r.Disk, varSize); err != nil {
 				fatal("partitioning disk: %v", err)
 			}
 		}
 
 		var efiPart, bootPart, rootPart string
+		partNum := 2
 		if isSystemdBoot {
 			// 2-partition layout: p1=EFI (1 GiB FAT32), p2=root (or ZFS pool).
 			// No separate ext4 /boot needed — systemd-boot reads directly from
-			// the FAT32 ESP. LUKS (if any) wraps p2.
+			// the FAT32 ESP. LUKS (if any) wraps the root.
 			efiPart = disk.PartName(r.Disk, 1)
-			rootPart = disk.PartName(r.Disk, 2)
 		} else {
 			// 3-partition layout: p1=EFI, p2=/boot (ext4), p3=root.
 			// The separate ext4 /boot keeps GRUB away from modern XFS features.
 			efiPart = disk.PartName(r.Disk, 1)
 			bootPart = disk.PartName(r.Disk, 2)
-			rootPart = disk.PartName(r.Disk, 3)
+			partNum = 3
 		}
+		// A sized /var sits between them and the root, so the root moves down one.
+		if varSize != "" {
+			r.VarDisk.Disk = disk.PartName(r.Disk, partNum)
+			partNum++
+		}
+		rootPart = disk.PartName(r.Disk, partNum)
 		rootDev := rootPart // may be replaced by /dev/mapper/fisherman-root if LUKS
 		activeRootPart = rootPart
+		activeRootPartNum = partNum
 		poolName := disk.PoolName(r.ZFSPoolName) // only used when r.Filesystem == "zfs"
 
 		// ── Step 2: Format EFI ───────────────────────────────────────────────
@@ -687,10 +701,10 @@ func main() {
 
 		// Release kernel and userspace references to the root partition before
 		// modifying its GPT type. bootc install may have left active references.
-		if err := disk.UnmountPartition(r.Disk, 2); err != nil {
+		if err := disk.UnmountPartition(r.Disk, activeRootPartNum); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not fully clean partition references: %v\n", err)
 		}
-		if err := disk.SetPartitionType(r.Disk, 2, disk.GPTPartTypeLinuxRootX86_64); err != nil {
+		if err := disk.SetPartitionType(r.Disk, activeRootPartNum, disk.GPTPartTypeLinuxRootX86_64); err != nil {
 			fatal("retagging root partition: %v", err)
 		}
 		// Remount root so finalization and post-install writes can proceed.
@@ -701,8 +715,7 @@ func main() {
 		if err := os.MkdirAll(activeTargetMount, 0o755); err != nil {
 			fatal("recreating target mountpoint before remount: %v", err)
 		}
-		rootPart := disk.PartName(r.Disk, 2)
-		if err := disk.Mount(rootPart, activeTargetMount, ""); err != nil {
+		if err := disk.Mount(activeRootPart, activeTargetMount, ""); err != nil {
 			fatal("remounting root partition after retagging: %v", err)
 		}
 		// Remount EFI so that Plymouth/LUKS arg writes land on the real ESP
