@@ -889,16 +889,20 @@ func main() {
 	// UUID is the filesystem inside the mapper: the container is opened from
 	// the crypttab entry below before the mount is attempted.
 	if hasVarDisk {
+		encrypted := varLuksUUID != ""
 		varUUID := disk.UUID(activeVarMount)
-		if varUUID == "" {
-			// An encrypted /var with no filesystem UUID would be opened at
-			// boot and mounted nowhere, so the pair fails together.
-			if varLuksUUID != "" {
-				fatal("reading the /var filesystem UUID: blkid said nothing, and the machine would open a container nothing mounts")
-			}
+		switch {
+		case varUUID == "" && encrypted:
+			// An opened container nothing mounts is a stranded volume, so the
+			// two halves of the mechanism fail together.
+			fatal("reading the /var filesystem UUID: blkid said nothing, and the machine would open a container nothing mounts")
+		case varUUID == "":
 			progress.Info(fmt.Sprintf("Warning: could not determine UUID for /var disk %s — skipping fstab entry", activeVarMount))
-		} else {
+		default:
 			if err := post.AppendFstabEntry(activeTargetMount, varUUID, "/var", "xfs", "defaults"); err != nil {
+				if encrypted {
+					fatal("writing the /var fstab entry: %v", err)
+				}
 				progress.Info(fmt.Sprintf("Warning: could not write /var fstab entry: %v", err))
 			} else {
 				progress.Info(fmt.Sprintf("Added /var fstab entry (UUID=%s)", varUUID))
@@ -906,7 +910,7 @@ func main() {
 		}
 		// The installed system opens the container itself, with the key file
 		// the second slot was given, so nothing is typed for /var at boot.
-		if varLuksUUID != "" {
+		if encrypted {
 			if err := post.InstallVarCrypt(activeTargetMount, "var", varLuksUUID, varKey); err != nil {
 				fatal("installing the /var key file: %v", err)
 			}
