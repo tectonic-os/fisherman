@@ -163,6 +163,19 @@ func TestCreateUserComposeFsUsesRootFlag(t *testing.T) {
 		}
 		if c[0] == "useradd" && c[1] == "--root" && c[2] == wantRoot {
 			sawUseradd = true
+			// login.defs sets CREATE_HOME yes, so leaving the home to useradd
+			// walks the deploy root's var symlink and exits 12; the tmpfiles
+			// snippet is what creates it on first boot.
+			var noHome bool
+			for _, a := range c[3:] {
+				noHome = noHome || a == "--no-create-home"
+				if a == "--create-home" {
+					t.Errorf("composefs must not create the home at install: %v", c)
+				}
+			}
+			if !noHome {
+				t.Errorf("useradd on composefs must pass --no-create-home: %v", c)
+			}
 		}
 	}
 	if !sawUseradd {
