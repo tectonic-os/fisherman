@@ -90,14 +90,17 @@ func CreateUser(sysroot string, u UserConfig) error {
 		// positional login name alongside the username and shadow-utils exits 2
 		// ("invalid command syntax", dakota GH matrix 20260724T1705).
 		//
-		// Also drop --create-home: on a composefs-native deploy root, /home is a
-		// symlink to a stateroot var that does not exist under --root, so useradd
-		// --create-home cannot create the directory and exits 12 (dakota GH
-		// matrix 20260724T2128). The passwd entry is written without it, and the
-		// composefs tmpfiles.d snippet below builds+labels /var/home/<user> from
-		// /etc/skel on first boot — the same mechanism the ostree branch relies
-		// on after its relocation.
-		cargs := []string{"--root", root}
+		// Drop --create-home and pass --no-create-home: the deploy root's /var
+		// is a symlink into the stateroot (var -> ../../os/default/var), which
+		// only the first boot creates, and useradd's home creation walks it and
+		// exits 12 ("cannot create directory /var", measured 2026-09-16 on
+		// fedora-bootc:44 composefs). Omitting the flag is not enough, because
+		// login.defs sets CREATE_HOME yes and useradd creates the home by
+		// default. --no-create-home writes the passwd entry alone, and the
+		// composefs tmpfiles.d snippet below builds+labels /var/home/<user>
+		// from /etc/skel on first boot — the same mechanism the ostree branch
+		// relies on after its relocation.
+		cargs := []string{"--root", root, "--no-create-home"}
 		for _, a := range tail[1:] {
 			if a == "--create-home" {
 				continue
