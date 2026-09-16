@@ -76,6 +76,10 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 		"shred -u /etc/fisherman/tpm2-enroll.key",
 		"systemctl disable fisherman-tpm2-enroll.service",
 		"ConditionPathExists=/etc/fisherman/tpm2-enroll.key",
+		// The bounded retry, without which an emulated TPM's first
+		// Esys_LoadExternal failure leaves the machine with no token.
+		"for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll",
+		"&& exit 0; sleep 5; done; exit 1",
 	} {
 		if !strings.Contains(us, want) {
 			t.Errorf("unit missing %q", want)

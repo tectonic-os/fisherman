@@ -201,7 +201,19 @@ func StageFirstBootEnrollment(etcDir, luksUUID, key string, pcrPolicy bool) erro
 
 	// The oneshot: enroll against the running system's PCRs, shred the key,
 	// and disable itself so it never runs again. Idempotent — a second run
-	// (key already gone) is a clean no-op.
+	// (key already gone) is a clean no-op, and a successful enrollment
+	// followed by a retry is a no-op of its own ("This PCR set is already
+	// enrolled, executing no operation").
+	//
+	// The retry loop is for an emulated TPM whose operations fail while the
+	// machine is still settling: on the stage 7 VM swtpm 0.7.1 failed every
+	// systemd-cryptenroll attempt made in the minute after boot with
+	// Esys_LoadExternal 0x2c4 (State not recoverable), and the identical
+	// command enrolled minutes later. Whether that is per-boot, per-context
+	// or time-based is not settled, so this loop may still fail all five
+	// attempts; the first-boot journal is what tells. ExecStartPost runs only
+	// after the loop exits 0, so a failed enrollment keeps the key for the
+	// next boot and a later success is systemd-cryptenroll's own no-op.
 	enroll := "--tpm2-pcrs=7"
 	if pcrPolicy {
 		enroll = "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem" +
@@ -217,7 +229,7 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=no
-ExecStart=/usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + `
+ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + ` && exit 0; sleep 5; done; exit 1'
 ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.key
 ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
 
