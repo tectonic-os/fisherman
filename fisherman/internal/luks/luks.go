@@ -125,6 +125,37 @@ func EnrollTPM2(partition, passphrase string) error {
 	})
 }
 
+// ImageHasPcrPolicy reports whether the image carries the signed PCR 11
+// policy, the marker boot/uki writes when its build had the PCR signing key.
+// Only then can a first-boot TPM2 enrollment name the stub's
+// /run/systemd/tpm2-pcr-public-key.pem and tpm2-pcr-signature.json; every
+// other image keeps PCR 7 alone, exactly as before the policy existed.
+//
+// The image is asked, not the target: a composefs-native deployment is a
+// sealed erofs under composefs/ and has no walkable /usr, so the image's own
+// filesystem is the only place the marker can be read. A failure to ask is
+// false, which is the PCR 7 shape every chain had before the policy.
+func ImageHasPcrPolicy(image string) bool {
+	if image == "" {
+		return false
+	}
+	return runner.Run(
+		"podman",
+		"run",
+		"--rm",
+		"--pull=never",
+		"--net=none",
+		"--security-opt",
+		"label=disable",
+		"--entrypoint",
+		"",
+		image,
+		"/usr/bin/test",
+		"-s",
+		"/usr/share/tectonic/pcr-policy.pem",
+	) == nil
+}
+
 // StageFirstBootEnrollment installs a oneshot into the target that enrolls
 // the TPM2 token on the FIRST BOOT of the installed system, then shreds the
 // transient key and disables itself.
@@ -136,10 +167,18 @@ func EnrollTPM2(partition, passphrase string) error {
 // boot (observed: the LUKS E2E dropped to a passphrase prompt). Enrolling in
 // the booted target captures the correct PCR 7.
 //
+// pcrPolicy says the installed image carries a signed PCR 11 policy. Then the
+// enrollment binds to that policy as well as PCR 7: systemd-stub places the
+// UKI's own .pcrsig/.pcrpkey in /run/systemd/ as it boots, and both paths are
+// named explicitly because a missing policy otherwise seals the token to no
+// PCRs at all. The signed policy is what survives a kernel update; PCR 7
+// keeps the machine's Secure Boot state in the lock too. Without the policy
+// the unit is PCR 7 alone, which is what every chain had before it.
+//
 // targetMount is the installed root; luksUUID identifies the LUKS partition
 // (by-uuid is stable across the install→installed device renumbering); key
 // is the transient unlock passphrase/recovery key.
-func StageFirstBootEnrollment(targetMount, luksUUID, key string) error {
+func StageFirstBootEnrollment(targetMount, luksUUID, key string, pcrPolicy bool) error {
 	if luksUUID == "" {
 		return fmt.Errorf("first-boot TPM2 enrollment needs the LUKS UUID")
 	}
@@ -152,9 +191,14 @@ func StageFirstBootEnrollment(targetMount, luksUUID, key string) error {
 		return fmt.Errorf("write transient key: %w", err)
 	}
 
-	// The oneshot: enroll against the running system's PCR 7, shred the key,
+	// The oneshot: enroll against the running system's PCRs, shred the key,
 	// and disable itself so it never runs again. Idempotent — a second run
 	// (key already gone) is a clean no-op.
+	enroll := "--tpm2-pcrs=7"
+	if pcrPolicy {
+		enroll = "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem" +
+			" --tpm2-signature=/run/systemd/tpm2-pcr-signature.json"
+	}
 	unit := `[Unit]
 Description=Fisherman first-boot TPM2 LUKS enrollment
 Documentation=https://github.com/tuna-os/fisherman
@@ -165,7 +209,7 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=no
-ExecStart=/usr/bin/systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + `
+ExecStart=/usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + `
 ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.key
 ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
 

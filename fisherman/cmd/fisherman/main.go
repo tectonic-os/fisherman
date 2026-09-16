@@ -851,8 +851,11 @@ func main() {
 		// installer, but the installed system boots a different chain and
 		// measures a different PCR 7 — so an install-time enrollment can
 		// never unseal on first boot. Staging a first-boot oneshot captures
-		// the correct PCR 7. The recovery/passphrase key unlocks until then.
-		if err := luks.StageFirstBootEnrollment(activeTargetMount, activeLuksUUID, unlockPassphrase); err != nil {
+		// the correct PCRs. An image carrying the signed PCR 11 policy binds
+		// to that as well, which is what survives a kernel update; an image
+		// without it keeps PCR 7 alone. The recovery/passphrase key unlocks
+		// until then.
+		if err := luks.StageFirstBootEnrollment(activeTargetMount, activeLuksUUID, unlockPassphrase, luks.ImageHasPcrPolicy(r.Image)); err != nil {
 			progress.Info(fmt.Sprintf("Warning: could not stage first-boot TPM2 enrollment (recovery key unlock still works): %v", err))
 		} else {
 			progress.Info("TPM2 auto-unlock will be enrolled on first boot")
