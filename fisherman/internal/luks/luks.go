@@ -156,9 +156,9 @@ func ImageHasPcrPolicy(image string) bool {
 	) == nil
 }
 
-// StageFirstBootEnrollment installs a oneshot into the target that enrolls
-// the TPM2 token on the FIRST BOOT of the installed system, then shreds the
-// transient key and disables itself.
+// StageFirstBootEnrollment installs a oneshot into the installed system's own
+// /etc that enrolls the TPM2 token on the FIRST BOOT of the installed system,
+// then shreds the transient key and disables itself.
 //
 // Why not enroll during install: systemd-cryptenroll --tpm2-pcrs=7 seals
 // against PCR 7 (Secure Boot state) as measured RIGHT NOW — inside the live
@@ -175,14 +175,22 @@ func ImageHasPcrPolicy(image string) bool {
 // keeps the machine's Secure Boot state in the lock too. Without the policy
 // the unit is PCR 7 alone, which is what every chain had before it.
 //
-// targetMount is the installed root; luksUUID identifies the LUKS partition
-// (by-uuid is stable across the install→installed device renumbering); key
-// is the transient unlock passphrase/recovery key.
-func StageFirstBootEnrollment(targetMount, luksUUID, key string, pcrPolicy bool) error {
+// etcDir is the installed system's own /etc — the deployment's, not the
+// physical root's. The booted system binds its /etc from the deployment, so a
+// unit or key written to <sysroot>/etc is invisible at runtime (measured
+// 2026-09-16: the unit was absent and no token was enrolled). The caller
+// resolves it with post.DeployEtcDir; luks cannot, because post imports luks.
+// luksUUID identifies the LUKS partition (by-uuid is stable across the
+// install→installed device renumbering); key is the transient unlock
+// passphrase/recovery key.
+func StageFirstBootEnrollment(etcDir, luksUUID, key string, pcrPolicy bool) error {
 	if luksUUID == "" {
 		return fmt.Errorf("first-boot TPM2 enrollment needs the LUKS UUID")
 	}
-	keyDir := targetMount + "/etc/fisherman"
+	if etcDir == "" {
+		return fmt.Errorf("first-boot TPM2 enrollment needs the deployment's /etc")
+	}
+	keyDir := etcDir + "/fisherman"
 	if err := os.MkdirAll(keyDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", keyDir, err)
 	}
@@ -216,7 +224,10 @@ ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
 [Install]
 WantedBy=multi-user.target
 `
-	unitDir := targetMount + "/usr/lib/systemd/system"
+	// The unit sits in the deployment's etc next to its enable symlink, which
+	// is where systemctl enable puts a unit a machine-local enablement owns —
+	// a bootc upgrade replaces /usr and would drop one staged under it.
+	unitDir := etcDir + "/systemd/system"
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", unitDir, err)
 	}
@@ -225,13 +236,15 @@ WantedBy=multi-user.target
 		return fmt.Errorf("write unit: %w", err)
 	}
 	// Enable via wants symlink (systemctl enable isn't available offline).
-	wantsDir := targetMount + "/etc/systemd/system/multi-user.target.wants"
+	// Absolute, the form measured from `systemctl enable` on a booted
+	// composefs target and the form the tool writes.
+	wantsDir := unitDir + "/multi-user.target.wants"
 	if err := os.MkdirAll(wantsDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir wants: %w", err)
 	}
 	link := wantsDir + "/fisherman-tpm2-enroll.service"
 	_ = os.Remove(link)
-	if err := os.Symlink("/usr/lib/systemd/system/fisherman-tpm2-enroll.service", link); err != nil {
+	if err := os.Symlink("/etc/systemd/system/fisherman-tpm2-enroll.service", link); err != nil {
 		return fmt.Errorf("enable unit: %w", err)
 	}
 	return nil

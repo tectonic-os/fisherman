@@ -855,7 +855,13 @@ func main() {
 		// to that as well, which is what survives a kernel update; an image
 		// without it keeps PCR 7 alone. The recovery/passphrase key unlocks
 		// until then.
-		if err := luks.StageFirstBootEnrollment(activeTargetMount, activeLuksUUID, unlockPassphrase, luks.ImageHasPcrPolicy(r.Image)); err != nil {
+		// The unit and its transient key go into the deployment's own /etc,
+		// which is what the booted system binds at /etc — the physical root's
+		// /etc is not a directory any boot reads.
+		deployEtc, etcErr := post.DeployEtcDir(activeTargetMount)
+		if etcErr != nil {
+			progress.Info(fmt.Sprintf("Warning: could not stage first-boot TPM2 enrollment (recovery key unlock still works): %v", etcErr))
+		} else if err := luks.StageFirstBootEnrollment(deployEtc, activeLuksUUID, unlockPassphrase, luks.ImageHasPcrPolicy(r.Image)); err != nil {
 			progress.Info(fmt.Sprintf("Warning: could not stage first-boot TPM2 enrollment (recovery key unlock still works): %v", err))
 		} else {
 			progress.Info("TPM2 auto-unlock will be enrolled on first boot")

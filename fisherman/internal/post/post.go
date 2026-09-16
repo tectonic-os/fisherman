@@ -708,7 +708,7 @@ func EnablePrintServices(target string) {
 // AppendFstabEntry appends an fstab entry to the installed system at target.
 // Works for both composefs-native and ostree-based deployments.
 func AppendFstabEntry(target, uuid, mountpoint, fstype, options string) error {
-	etcDir, err := deployEtcDir(target)
+	etcDir, err := DeployEtcDir(target)
 	if err != nil {
 		return err
 	}
@@ -731,10 +731,10 @@ func AppendFstabEntry(target, uuid, mountpoint, fstype, options string) error {
 	return nil
 }
 
-// deployEtcDir is the installed system's own /etc: the deployment's for both
+// DeployEtcDir is the installed system's own /etc: the deployment's for both
 // backends, because a plain write to the physical root's /etc would not be the
 // directory the booted system reads.
-func deployEtcDir(target string) (string, error) {
+func DeployEtcDir(target string) (string, error) {
 	if isComposeFsNative(target) {
 		etcDir, err := ComposeFsDeployEtcDirFn(target)
 		if err != nil {
@@ -758,7 +758,7 @@ func InstallVarCrypt(target, name, luksUUID string, key []byte) error {
 	if luksUUID == "" {
 		return fmt.Errorf("installing the %s key file needs the container's LUKS UUID", name)
 	}
-	etcDir, err := deployEtcDir(target)
+	etcDir, err := DeployEtcDir(target)
 	if err != nil {
 		return err
 	}

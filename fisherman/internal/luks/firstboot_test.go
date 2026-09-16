@@ -46,13 +46,13 @@ func TestImageHasPcrPolicy(t *testing.T) {
 }
 
 func TestStageFirstBootEnrollment(t *testing.T) {
-	target := t.TempDir()
+	etc := t.TempDir()
 	uuid := "abcd-1234-uuid"
-	if err := StageFirstBootEnrollment(target, uuid, "secret-recovery-key", false); err != nil {
+	if err := StageFirstBootEnrollment(etc, uuid, "secret-recovery-key", false); err != nil {
 		t.Fatal(err)
 	}
 	// transient key: present, 0600, correct content
-	kp := filepath.Join(target, "etc/fisherman/tpm2-enroll.key")
+	kp := filepath.Join(etc, "fisherman/tpm2-enroll.key")
 	fi, err := os.Stat(kp)
 	if err != nil {
 		t.Fatalf("key file: %v", err)
@@ -64,7 +64,7 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 		t.Errorf("key content mismatch")
 	}
 	// unit: references the UUID device, shreds the key, self-disables
-	up := filepath.Join(target, "usr/lib/systemd/system/fisherman-tpm2-enroll.service")
+	up := filepath.Join(etc, "systemd/system/fisherman-tpm2-enroll.service")
 	u, err := os.ReadFile(up)
 	if err != nil {
 		t.Fatalf("unit: %v", err)
@@ -81,14 +81,43 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 			t.Errorf("unit missing %q", want)
 		}
 	}
-	// enabled via wants symlink
-	link := filepath.Join(target, "etc/systemd/system/multi-user.target.wants/fisherman-tpm2-enroll.service")
+	// Enabled via wants symlink. The target is absolute — the booted system's
+	// /etc/systemd/system — so Lstat asserts the link and Readlink its target;
+	// a relative form such as "../fisherman-tpm2-enroll.service" fails here.
+	link := filepath.Join(etc, "systemd/system/multi-user.target.wants/fisherman-tpm2-enroll.service")
 	if _, err := os.Lstat(link); err != nil {
 		t.Errorf("wants symlink missing: %v", err)
 	}
-	// empty UUID is rejected
-	if err := StageFirstBootEnrollment(t.TempDir(), "", "k", false); err == nil {
+	if target, err := os.Readlink(link); err != nil || target != "/etc/systemd/system/fisherman-tpm2-enroll.service" {
+		t.Errorf("wants symlink target %q (%v), want /etc/systemd/system/fisherman-tpm2-enroll.service", target, err)
+	}
+	// empty UUID or /etc is rejected
+	if err := StageFirstBootEnrollment(etc, "", "k", false); err == nil {
 		t.Error("expected error for empty UUID")
+	}
+	if err := StageFirstBootEnrollment("", uuid, "k", false); err == nil {
+		t.Error("expected error for empty etc dir")
+	}
+}
+
+// The deployment's /etc is what the booted system reads. A unit staged under
+// the physical root's /usr never appears at /usr/lib/systemd/system on the
+// machine, and no token is enrolled (measured 2026-09-16: the unit was absent
+// and `cryptsetup luksDump` showed the recovery keyslot alone).
+func TestStageFirstBootEnrollment_WritesTheDeploymentEtcOnly(t *testing.T) {
+	root := t.TempDir()
+	etc := filepath.Join(root, "state", "deploy", "e720b196", "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "usr", "lib", "systemd", "system", "fisherman-tpm2-enroll.service")); !os.IsNotExist(err) {
+		t.Errorf("unit reached the physical root's /usr: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "etc")); !os.IsNotExist(err) {
+		t.Errorf("key or unit reached the physical root's /etc: %v", err)
 	}
 }
 
@@ -96,11 +125,11 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 // missing policy must fail instead of silently sealing the token to no PCRs,
 // and the Secure Boot state stays in the lock too.
 func TestStageFirstBootEnrollmentPcrPolicy(t *testing.T) {
-	target := t.TempDir()
-	if err := StageFirstBootEnrollment(target, "abcd-1234-uuid", "k", true); err != nil {
+	etc := t.TempDir()
+	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", true); err != nil {
 		t.Fatal(err)
 	}
-	u, err := os.ReadFile(filepath.Join(target, "usr/lib/systemd/system/fisherman-tpm2-enroll.service"))
+	u, err := os.ReadFile(filepath.Join(etc, "systemd/system/fisherman-tpm2-enroll.service"))
 	if err != nil {
 		t.Fatalf("unit: %v", err)
 	}
