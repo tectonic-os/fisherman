@@ -195,10 +195,10 @@ func TestCheckRequiredTools_MissingSystemdCryptenrollForTPM2(t *testing.T) {
 		return "/usr/bin/" + file, nil
 	}
 
-	for _, encType := range []string{"tpm2-luks", "tpm2-luks-passphrase"} {
+	for _, encType := range []string{"tpm2-luks", "tpm2-luks-passphrase", "tpm2-luks-pin"} {
 		r := &recipe.Recipe{
 			Filesystem: "xfs",
-			Encryption: recipe.Encryption{Type: encType, Passphrase: "hunter2"},
+			Encryption: recipe.Encryption{Type: encType, Passphrase: "hunter2", Pin: "4321"},
 		}
 		err := checkRequiredTools(r)
 		if err == nil {

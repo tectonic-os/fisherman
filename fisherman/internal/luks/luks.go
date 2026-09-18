@@ -113,15 +113,23 @@ func UUID(partition string) string {
 // systemd-cryptenroll resolves "--unlock-key-file=-" against the process home
 // directory (/var/roothome when running under pkexec), which fails when that
 // path does not exist. A temp file avoids this root home lookup entirely.
-func EnrollTPM2(partition, passphrase string) error {
+//
+// pin, when non-empty, adds --tpm2-with-pin=yes so unlocking also needs the
+// PIN typed at boot. With no cryptenroll.new-tpm2-pin service credential set
+// (there is no CLI flag or file argument for a new PIN, read from
+// systemd-cryptenroll(1) CREDENTIALS), systemd-cryptenroll prompts on the
+// terminal for it, same as a human running the command directly.
+func EnrollTPM2(partition, passphrase, pin string) error {
 	return withTempKeyFile(passphrase, func(path string) error {
-		return runner.Run(
-			"systemd-cryptenroll",
+		args := []string{
 			"--tpm2-device=auto",
 			"--tpm2-pcrs=7",
-			fmt.Sprintf("--unlock-key-file=%s", path),
-			partition,
-		)
+		}
+		if pin != "" {
+			args = append(args, "--tpm2-with-pin=yes")
+		}
+		args = append(args, fmt.Sprintf("--unlock-key-file=%s", path), partition)
+		return runner.Run("systemd-cryptenroll", args...)
 	})
 }
 
@@ -183,7 +191,15 @@ func ImageHasPcrPolicy(image string) bool {
 // luksUUID identifies the LUKS partition (by-uuid is stable across the
 // install→installed device renumbering); key is the transient unlock
 // passphrase/recovery key.
-func StageFirstBootEnrollment(etcDir, luksUUID, key string, pcrPolicy bool) error {
+//
+// pin, when non-empty, binds the enrollment to a PIN typed at every unlock as
+// well as the PCRs (`--tpm2-with-pin=yes`). systemd-cryptenroll takes a new
+// PIN only through the cryptenroll.new-tpm2-pin service credential — there is
+// no CLI flag or file argument for it (systemd-cryptenroll(1) CREDENTIALS,
+// added in v256; Fedora 44 carries systemd 259.8) — so the PIN is staged next
+// to the transient key and loaded with LoadCredential=, then shredded
+// alongside it once the loop exits 0.
+func StageFirstBootEnrollment(etcDir, luksUUID, key, pin string, pcrPolicy bool) error {
 	if luksUUID == "" {
 		return fmt.Errorf("first-boot TPM2 enrollment needs the LUKS UUID")
 	}
@@ -197,6 +213,12 @@ func StageFirstBootEnrollment(etcDir, luksUUID, key string, pcrPolicy bool) erro
 	keyPath := keyDir + "/tpm2-enroll.key"
 	if err := os.WriteFile(keyPath, []byte(key), 0o600); err != nil {
 		return fmt.Errorf("write transient key: %w", err)
+	}
+	if pin != "" {
+		pinPath := keyDir + "/tpm2-enroll.pin"
+		if err := os.WriteFile(pinPath, []byte(pin), 0o600); err != nil {
+			return fmt.Errorf("write transient pin: %w", err)
+		}
 	}
 
 	// The oneshot: enroll against the running system's PCRs, shred the key,
@@ -219,6 +241,13 @@ func StageFirstBootEnrollment(etcDir, luksUUID, key string, pcrPolicy bool) erro
 		enroll = "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem" +
 			" --tpm2-signature=/run/systemd/tpm2-pcr-signature.json"
 	}
+	loadCredential := ""
+	shredPin := ""
+	if pin != "" {
+		enroll += " --tpm2-with-pin=yes"
+		loadCredential = "LoadCredential=cryptenroll.new-tpm2-pin:/etc/fisherman/tpm2-enroll.pin\n"
+		shredPin = "ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.pin\n"
+	}
 	unit := `[Unit]
 Description=Fisherman first-boot TPM2 LUKS enrollment
 Documentation=https://github.com/tuna-os/fisherman
@@ -229,9 +258,9 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=no
-ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + ` && exit 0; sleep 5; done; exit 1'
+` + loadCredential + `ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + ` && exit 0; sleep 5; done; exit 1'
 ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.key
-ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
+` + shredPin + `ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
 
 [Install]
 WantedBy=multi-user.target

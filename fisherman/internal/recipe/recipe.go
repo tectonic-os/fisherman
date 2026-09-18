@@ -160,8 +160,9 @@ type CustomMount struct {
 
 // Encryption describes the disk encryption configuration.
 type Encryption struct {
-	Type       string `json:"type"`       // "none", "luks-passphrase", "tpm2-luks", "tpm2-luks-passphrase"
-	Passphrase string `json:"passphrase"` // required for luks-passphrase and tpm2-luks-passphrase
+	Type       string `json:"type"`          // "none", "luks-passphrase", "tpm2-luks", "tpm2-luks-passphrase", "tpm2-luks-pin"
+	Passphrase string `json:"passphrase"`    // required for luks-passphrase and tpm2-luks-passphrase
+	Pin        string `json:"pin,omitempty"` // required for tpm2-luks-pin: typed at every unlock in addition to the TPM policy
 }
 
 // Load reads and parses a recipe JSON file.
@@ -259,12 +260,15 @@ func (r *Recipe) Validate() error {
 		return fmt.Errorf("bootloader must be \"grub2\" or \"systemd\", got %q", r.Bootloader)
 	}
 	switch r.Encryption.Type {
-	case "", "none", "tpm2-luks", "luks-passphrase", "tpm2-luks-passphrase":
+	case "", "none", "tpm2-luks", "luks-passphrase", "tpm2-luks-passphrase", "tpm2-luks-pin":
 	default:
-		return fmt.Errorf("encryption.type must be \"none\", \"luks-passphrase\", \"tpm2-luks\", or \"tpm2-luks-passphrase\"")
+		return fmt.Errorf("encryption.type must be \"none\", \"luks-passphrase\", \"tpm2-luks\", \"tpm2-luks-passphrase\", or \"tpm2-luks-pin\"")
 	}
 	if (r.Encryption.Type == "luks-passphrase" || r.Encryption.Type == "tpm2-luks-passphrase") && r.Encryption.Passphrase == "" {
 		return fmt.Errorf("encryption.passphrase required for %s", r.Encryption.Type)
+	}
+	if r.Encryption.Type == "tpm2-luks-pin" && r.Encryption.Pin == "" {
+		return fmt.Errorf("encryption.pin required for tpm2-luks-pin")
 	}
 	// image may be empty in live-ISO mode; bootc auto-detects the running container.
 	if r.VarDisk != nil {

@@ -70,6 +70,13 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "valid tpm2-luks-pin",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "xfs", Hostname: "h",
+				Encryption: recipe.Encryption{Type: "tpm2-luks-pin", Pin: "4321"},
+			},
+		},
+		{
 			name: "valid composefs_backend true",
 			r:    recipe.Recipe{Disk: diskPath, Filesystem: "btrfs", Hostname: "h", ComposeFsBackend: true},
 		},
@@ -169,6 +176,14 @@ func TestValidate(t *testing.T) {
 				Encryption: recipe.Encryption{Type: "tpm2-luks-passphrase"},
 			},
 			wantErr: "passphrase required",
+		},
+		{
+			name: "tpm2-luks-pin empty pin",
+			r: recipe.Recipe{
+				Disk: diskPath, Filesystem: "xfs", Hostname: "h",
+				Encryption: recipe.Encryption{Type: "tpm2-luks-pin"},
+			},
+			wantErr: "pin required",
 		},
 		{
 			name: "unknown encryption type",

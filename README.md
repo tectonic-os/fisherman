@@ -65,9 +65,11 @@ sudo fisherman <recipe.json>
 }
 ```
 
-**Encryption types:** `none`, `luks-passphrase`, `tpm2-luks`, `tpm2-luks-passphrase`
+**Encryption types:** `none`, `luks-passphrase`, `tpm2-luks`, `tpm2-luks-passphrase`, `tpm2-luks-pin`
 
 For `luks-passphrase` and `tpm2-luks-passphrase`, add `"passphrase": "hunter2"` inside the `encryption` object.
+
+For `tpm2-luks-pin`, add `"pin": "1234"` instead: like `tpm2-luks`, unlock is by TPM alone plus a generated recovery passphrase (printed once at install), but the TPM policy also requires this PIN at every boot.
 
 ## Image catalog
 

@@ -159,6 +159,13 @@ func expandPath() {
 	os.Setenv("PATH", prefix)
 }
 
+// isTPM2Type reports whether an encryption type enrolls a TPM2 auto-unlock
+// token, which is every "tpm2-luks*" kind: the bare recovery-passphrase form,
+// the user-passphrase fallback, and the PIN-gated form.
+func isTPM2Type(t string) bool {
+	return t == "tpm2-luks" || t == "tpm2-luks-passphrase" || t == "tpm2-luks-pin"
+}
+
 // checkRequiredTools verifies that every host binary needed by this recipe
 // is reachable on PATH before we touch any disks, and returns a clear error
 // naming the missing tool and the package that provides it.
@@ -180,7 +187,7 @@ func checkRequiredTools(r *recipe.Recipe) error {
 		// systemd-cryptenroll is required for TPM2 auto-unlock enrolment.
 		// Check before touching any disks — a missing tool at step 9 (after
 		// partitioning and OS install) would leave the disk partially modified.
-		{"systemd-cryptenroll", "systemd", r.Encryption.Type == "tpm2-luks" || r.Encryption.Type == "tpm2-luks-passphrase"},
+		{"systemd-cryptenroll", "systemd", isTPM2Type(r.Encryption.Type)},
 		{"skopeo", "skopeo", true},
 		{"podman", "podman", true},
 	}
@@ -344,7 +351,7 @@ func main() {
 	}
 
 	hasEncryption := r.Encryption.Type != "" && r.Encryption.Type != "none"
-	hasTPM2 := r.Encryption.Type == "tpm2-luks" || r.Encryption.Type == "tpm2-luks-passphrase"
+	hasTPM2 := isTPM2Type(r.Encryption.Type)
 	isManual := len(r.CustomMounts) > 0
 	isSystemdBoot := r.Bootloader == "systemd" || r.Filesystem == "zfs"
 
@@ -375,7 +382,7 @@ func main() {
 		totalSteps++ // extra step for LUKS setup (auto mode only)
 	}
 	if hasTPM2 {
-		totalSteps++ // extra step for TPM2 enrolment (both tpm2-luks and tpm2-luks-passphrase)
+		totalSteps++ // extra step for TPM2 enrolment (every tpm2-luks* kind)
 	}
 	hasVarDisk := r.VarDisk != nil
 	if hasVarDisk && !r.VarDisk.KeepExisting {
@@ -563,7 +570,7 @@ func main() {
 			switch r.Encryption.Type {
 			case "luks-passphrase", "tpm2-luks-passphrase":
 				passphrase = r.Encryption.Passphrase
-			case "tpm2-luks":
+			case "tpm2-luks", "tpm2-luks-pin":
 				passphrase = luks.RandomPassphrase()
 				luksRecoveryKey = passphrase // emitted later so user can write it down
 				progress.Info("TPM2-LUKS: generated random recovery passphrase; TPM2 will be enrolled after install")
@@ -836,16 +843,27 @@ func main() {
 	}
 
 	// ── TPM2 enrolment ────────────────────────────────────────────────────────
-	// Both tpm2-luks and tpm2-luks-passphrase add a TPM2 auto-unlock token so
-	// the system boots without a passphrase prompt. The difference:
+	// tpm2-luks, tpm2-luks-passphrase and tpm2-luks-pin all add a TPM2
+	// auto-unlock token so the system boots without a passphrase prompt. The
+	// difference:
 	//   tpm2-luks:            random passphrase (recovery key) + TPM2
 	//   tpm2-luks-passphrase: user passphrase (fallback) + TPM2
+	//   tpm2-luks-pin:        random passphrase (recovery key) + TPM2 + a PIN
+	//                         required at every unlock alongside the PCRs
 	if hasTPM2 && activeRootPart != "" {
 		progress.Step(step, totalSteps, "Enrolling TPM2 auto-unlock", profile[pi].cumulativePct, profile[pi].weightPct)
 		pi++
 		step++
 
 		unlockPassphrase := rootPassphrase
+		// A pin only means anything for tpm2-luks-pin: a hand-authored recipe
+		// naming a different type but still carrying a leftover Pin value must
+		// not silently turn on --tpm2-with-pin for a type that never asked for
+		// one.
+		var pin string
+		if r.Encryption.Type == "tpm2-luks-pin" {
+			pin = r.Encryption.Pin
+		}
 		// Enroll TPM2 on the FIRST BOOT of the installed system, not here:
 		// --tpm2-pcrs=7 seals against PCR 7 as measured in the live
 		// installer, but the installed system boots a different chain and
@@ -861,7 +879,7 @@ func main() {
 		deployEtc, etcErr := post.DeployEtcDir(activeTargetMount)
 		if etcErr != nil {
 			progress.Info(fmt.Sprintf("Warning: could not stage first-boot TPM2 enrollment (recovery key unlock still works): %v", etcErr))
-		} else if err := luks.StageFirstBootEnrollment(deployEtc, activeLuksUUID, unlockPassphrase, luks.ImageHasPcrPolicy(r.Image)); err != nil {
+		} else if err := luks.StageFirstBootEnrollment(deployEtc, activeLuksUUID, unlockPassphrase, pin, luks.ImageHasPcrPolicy(r.Image)); err != nil {
 			progress.Info(fmt.Sprintf("Warning: could not stage first-boot TPM2 enrollment (recovery key unlock still works): %v", err))
 		} else {
 			progress.Info("TPM2 auto-unlock will be enrolled on first boot")

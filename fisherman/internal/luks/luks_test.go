@@ -194,7 +194,7 @@ func TestEnrollTPM2(t *testing.T) {
 	const pass = "hunter2"
 
 	rec := setup(t)
-	if err := luks.EnrollTPM2(part, pass); err != nil {
+	if err := luks.EnrollTPM2(part, pass, ""); err != nil {
 		t.Fatalf("EnrollTPM2: %v", err)
 	}
 
@@ -237,6 +237,32 @@ func TestEnrollTPM2(t *testing.T) {
 	// stdin is not used; the passphrase goes to a temp file.
 	if c.stdin != "" {
 		t.Errorf("stdin = %q, want empty (passphrase goes to temp file)", c.stdin)
+	}
+}
+
+func TestEnrollTPM2Pin(t *testing.T) {
+	rec := setup(t)
+	if err := luks.EnrollTPM2("/dev/sda3", "hunter2", "4321"); err != nil {
+		t.Fatalf("EnrollTPM2: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(rec.calls))
+	}
+	c := rec.calls[0]
+	// Args: --tpm2-device, --tpm2-pcrs, --tpm2-with-pin, --unlock-key-file=<tmp>, partition.
+	if len(c.args) != 5 {
+		t.Fatalf("expected 5 args, got %d: %v", len(c.args), c.args)
+	}
+	if c.args[2] != "--tpm2-with-pin=yes" {
+		t.Errorf("args[2] = %q, want --tpm2-with-pin=yes", c.args[2])
+	}
+	// The PIN is not a CLI flag or file argument here: systemd-cryptenroll
+	// takes a new PIN only through a service credential this bare process
+	// invocation has none of, so it falls back to its own terminal prompt.
+	for _, arg := range c.args {
+		if strings.Contains(arg, "4321") {
+			t.Errorf("pin leaked into argv: %q", arg)
+		}
 	}
 }
 

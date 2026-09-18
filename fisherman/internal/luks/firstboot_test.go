@@ -48,7 +48,7 @@ func TestImageHasPcrPolicy(t *testing.T) {
 func TestStageFirstBootEnrollment(t *testing.T) {
 	etc := t.TempDir()
 	uuid := "abcd-1234-uuid"
-	if err := StageFirstBootEnrollment(etc, uuid, "secret-recovery-key", false); err != nil {
+	if err := StageFirstBootEnrollment(etc, uuid, "secret-recovery-key", "", false); err != nil {
 		t.Fatal(err)
 	}
 	// transient key: present, 0600, correct content
@@ -96,10 +96,10 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 		t.Errorf("wants symlink target %q (%v), want /etc/systemd/system/fisherman-tpm2-enroll.service", target, err)
 	}
 	// empty UUID or /etc is rejected
-	if err := StageFirstBootEnrollment(etc, "", "k", false); err == nil {
+	if err := StageFirstBootEnrollment(etc, "", "k", "", false); err == nil {
 		t.Error("expected error for empty UUID")
 	}
-	if err := StageFirstBootEnrollment("", uuid, "k", false); err == nil {
+	if err := StageFirstBootEnrollment("", uuid, "k", "", false); err == nil {
 		t.Error("expected error for empty etc dir")
 	}
 }
@@ -114,7 +114,7 @@ func TestStageFirstBootEnrollment_WritesTheDeploymentEtcOnly(t *testing.T) {
 	if err := os.MkdirAll(etc, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", true); err != nil {
+	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", "", true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "usr", "lib", "systemd", "system", "fisherman-tpm2-enroll.service")); !os.IsNotExist(err) {
@@ -130,7 +130,7 @@ func TestStageFirstBootEnrollment_WritesTheDeploymentEtcOnly(t *testing.T) {
 // and the Secure Boot state stays in the lock too.
 func TestStageFirstBootEnrollmentPcrPolicy(t *testing.T) {
 	etc := t.TempDir()
-	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", true); err != nil {
+	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", "", true); err != nil {
 		t.Fatal(err)
 	}
 	u, err := os.ReadFile(filepath.Join(etc, "systemd/system/fisherman-tpm2-enroll.service"))
@@ -146,6 +146,56 @@ func TestStageFirstBootEnrollmentPcrPolicy(t *testing.T) {
 	} {
 		if !strings.Contains(us, want) {
 			t.Errorf("unit missing %q", want)
+		}
+	}
+}
+
+// The PIN has no CLI flag or file argument in systemd-cryptenroll — only the
+// cryptenroll.new-tpm2-pin service credential — so it must ride the unit's
+// LoadCredential=, be named in --tpm2-with-pin=yes, and be shredded alongside
+// the recovery key once the enrollment loop exits 0.
+func TestStageFirstBootEnrollmentPin(t *testing.T) {
+	etc := t.TempDir()
+	if err := StageFirstBootEnrollment(etc, "abcd-1234-uuid", "k", "4321", false); err != nil {
+		t.Fatal(err)
+	}
+	pp := filepath.Join(etc, "fisherman/tpm2-enroll.pin")
+	fi, err := os.Stat(pp)
+	if err != nil {
+		t.Fatalf("pin file: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("pin perm %o, want 600", fi.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(pp); string(b) != "4321" {
+		t.Errorf("pin content mismatch")
+	}
+	u, err := os.ReadFile(filepath.Join(etc, "systemd/system/fisherman-tpm2-enroll.service"))
+	if err != nil {
+		t.Fatalf("unit: %v", err)
+	}
+	us := string(u)
+	for _, want := range []string{
+		"LoadCredential=cryptenroll.new-tpm2-pin:/etc/fisherman/tpm2-enroll.pin",
+		"--tpm2-with-pin=yes",
+		"shred -u /etc/fisherman/tpm2-enroll.pin",
+	} {
+		if !strings.Contains(us, want) {
+			t.Errorf("unit missing %q", want)
+		}
+	}
+	// No pin: neither the file nor the credential/flag machinery appears.
+	etc2 := t.TempDir()
+	if err := StageFirstBootEnrollment(etc2, "abcd-1234-uuid", "k", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(etc2, "fisherman/tpm2-enroll.pin")); !os.IsNotExist(err) {
+		t.Errorf("pin file written with no pin: %v", err)
+	}
+	u2, _ := os.ReadFile(filepath.Join(etc2, "systemd/system/fisherman-tpm2-enroll.service"))
+	for _, absent := range []string{"tpm2-with-pin", "new-tpm2-pin"} {
+		if strings.Contains(string(u2), absent) {
+			t.Errorf("unit carries %q with no pin", absent)
 		}
 	}
 }
