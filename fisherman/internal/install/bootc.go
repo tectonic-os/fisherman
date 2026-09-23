@@ -892,8 +892,14 @@ func skopeoExportOCI(image, destDir, tmpdir string) error {
 		}
 	}
 
+	// skopeo refuses to copy signatures into an OCI destination, and the pull
+	// stores the payload's sigstore signatures when its registries.d enables
+	// sigstore attachments. This layout is only the bootc install source, so the
+	// signatures are dropped here; the installed machine verifies signatures
+	// when it pulls its own updates.
 	skopeoArgs := []string{
 		"copy",
+		"--remove-signatures",
 		containersStorageSource(image),
 		"oci:" + destDir,
 	}

@@ -104,17 +104,20 @@ func TestSkopeoExportOCI_Success(t *testing.T) {
 	}
 
 	args := readCapture(t, capture)
-	if len(args) != 3 {
-		t.Fatalf("skopeo argv = %v, want [copy containers-storage:... oci:...]", args)
+	if len(args) != 4 {
+		t.Fatalf("skopeo argv = %v, want [copy --remove-signatures containers-storage:... oci:...]", args)
 	}
 	if args[0] != "copy" {
 		t.Errorf("skopeo argv[0] = %q, want copy", args[0])
 	}
-	if want := "containers-storage:" + image; args[1] != want {
-		t.Errorf("skopeo source = %q, want %q", args[1], want)
+	if args[1] != "--remove-signatures" {
+		t.Errorf("skopeo argv[1] = %q, want --remove-signatures", args[1])
 	}
-	if want := "oci:" + destDir; args[2] != want {
-		t.Errorf("skopeo dest = %q, want %q", args[2], want)
+	if want := "containers-storage:" + image; args[2] != want {
+		t.Errorf("skopeo source = %q, want %q", args[2], want)
+	}
+	if want := "oci:" + destDir; args[3] != want {
+		t.Errorf("skopeo dest = %q, want %q", args[3], want)
 	}
 }
 
@@ -148,11 +151,14 @@ func TestSkopeoExportOCI_EmptyTmpdirFallsBack(t *testing.T) {
 		t.Fatalf("skopeoExportOCI() error = %v", err)
 	}
 	args := readCapture(t, capture)
-	if len(args) != 3 {
-		t.Fatalf("skopeo argv = %v, want 3 args", args)
+	if len(args) != 4 {
+		t.Fatalf("skopeo argv = %v, want 4 args", args)
 	}
-	if !strings.HasPrefix(args[2], "oci:") {
-		t.Errorf("skopeo dest = %q, want oci: prefix", args[2])
+	if args[1] != "--remove-signatures" {
+		t.Errorf("skopeo argv[1] = %q, want --remove-signatures", args[1])
+	}
+	if !strings.HasPrefix(args[3], "oci:") {
+		t.Errorf("skopeo dest = %q, want oci: prefix", args[3])
 	}
 }
 
