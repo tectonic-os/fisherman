@@ -80,6 +80,16 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 		// Esys_LoadExternal failure leaves the machine with no token.
 		"for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll",
 		"&& exit 0; sleep 5; done; exit 1",
+		// No login prompt of any kind starts before enrollment finishes,
+		// and what it prints reaches the console it would print over.
+		"Before=systemd-user-sessions.service",
+		// Without it the ordering above becomes a lockout: a oneshot has no
+		// start timeout by default, so a cryptenroll that hangs holds every
+		// getty and display manager forever.
+		"TimeoutStartSec=120",
+		"StandardOutput=journal+console",
+		"StandardError=journal+console",
+		"ExecStartPre=/bin/echo 'enrolling disk auto-unlock; this takes a few seconds'",
 	} {
 		if !strings.Contains(us, want) {
 			t.Errorf("unit missing %q", want)

@@ -248,16 +248,34 @@ func StageFirstBootEnrollment(etcDir, luksUUID, key, pin string, pcrPolicy bool)
 		loadCredential = "LoadCredential=cryptenroll.new-tpm2-pin:/etc/fisherman/tpm2-enroll.pin\n"
 		shredPin = "ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.pin\n"
 	}
+	// Before=systemd-user-sessions.service holds every getty and display
+	// manager until this exits, so its output never prints over a login
+	// prompt. Ordering only: a failure after the retry budget releases the
+	// login stack just as a success does.
+	//
+	// TimeoutStartSec is what makes that true of a hang as well as a failure.
+	// systemd.service(5): the start timeout "is disabled by default" for
+	// Type=oneshot. Without it a systemd-cryptenroll that blocks instead of
+	// erroring -- a TPM that answers no command -- would hold
+	// systemd-user-sessions forever, leaving no getty and no display manager
+	// on this boot and on every boot after it, since the key file survives and
+	// the condition stays true. The budget is the five attempts and their four
+	// sleeps with room to spare.
 	unit := `[Unit]
 Description=Fisherman first-boot TPM2 LUKS enrollment
 Documentation=https://github.com/tuna-os/fisherman
 ConditionPathExists=/etc/fisherman/tpm2-enroll.key
 After=basic.target
+Before=systemd-user-sessions.service
 DefaultDependencies=no
 
 [Service]
 Type=oneshot
 RemainAfterExit=no
+TimeoutStartSec=120
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStartPre=/bin/echo 'enrolling disk auto-unlock; this takes a few seconds'
 ` + loadCredential + `ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + ` && exit 0; sleep 5; done; exit 1'
 ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.key
 ` + shredPin + `ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
