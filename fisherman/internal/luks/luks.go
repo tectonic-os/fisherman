@@ -164,6 +164,19 @@ func ImageHasPcrPolicy(image string) bool {
 	) == nil
 }
 
+// The installer's automatic finalize leaves a marker beside the sealed
+// credential on the ESP, naming the one-time slot it added. The first-boot
+// unit reads it back from the ESP, which the installed system does not mount.
+const (
+	// espType is the GPT type every EFI System Partition carries.
+	espType = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+	// markerPath names the file the automatic finalize writes beside the
+	// credential; its presence means the cleanup is owed.
+	markerPath = "loader/credentials/cryptsetup.slot"
+	// credentialPath names the credential systemd-stub packs into the initrd.
+	credentialPath = "loader/credentials/cryptsetup.passphrase.cred"
+)
+
 // StageFirstBootEnrollment installs a oneshot into the installed system's own
 // /etc that enrolls the TPM2 token on the FIRST BOOT of the installed system,
 // then shreds the transient key and disables itself.
@@ -236,6 +249,15 @@ func StageFirstBootEnrollment(etcDir, luksUUID, key, pin string, pcrPolicy bool)
 	// attempts; the first-boot journal is what tells. ExecStartPost runs only
 	// after the loop exits 0, so a failed enrollment keeps the key for the
 	// next boot and a later success is systemd-cryptenroll's own no-op.
+	//
+	// Where the installer's automatic finalize ran, it left a marker beside
+	// the sealed credential on the ESP, naming the one-time slot it added.
+	// The same command wipes that slot and the unit then deletes both files,
+	// so the credential stops opening the volume at the boot the token
+	// arrives. The installed system mounts no boot partition, so the ESP is
+	// found by its GPT type. A cleanup that fails exits 1, which keeps the
+	// key and reruns the unit on the next boot; the wipe is skipped when the
+	// slot is already gone, so that retry is safe.
 	enroll := "--tpm2-pcrs=7"
 	if pcrPolicy {
 		enroll = "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem" +
@@ -261,6 +283,34 @@ func StageFirstBootEnrollment(etcDir, luksUUID, key, pin string, pcrPolicy bool)
 	// on this boot and on every boot after it, since the key file survives and
 	// the condition stays true. The budget is the five attempts and their four
 	// sleeps with room to spare.
+	// The cleanup runs inside the same bash command as the enrollment, because
+	// systemd runs ExecStartPost only after that command exits 0: a cleanup
+	// that fails must keep the key and hold the unit for the next boot.
+	cleanup := `mnt=/run/tpm2-enroll-esp; slot=; esp=; ` +
+		`while read -r name parttype; do ` +
+		`[ "$parttype" = "` + espType + `" ] || continue; ` +
+		`mkdir -p "$mnt"; ` +
+		`mount "/dev/$name" "$mnt" 2>/dev/null || continue; ` +
+		`if [ -s "$mnt/` + markerPath + `" ]; then ` +
+		`slot=$(cat "$mnt/` + markerPath + `"); esp=$name; break; ` +
+		`fi; ` +
+		`umount "$mnt" 2>/dev/null; ` +
+		`done < <(lsblk -rno NAME,PARTTYPE); ` +
+		`wipe=; ` +
+		`if [ -n "$slot" ] && cryptsetup luksDump "/dev/disk/by-uuid/` + luksUUID + `" | ` +
+		`grep -qE "^[[:space:]]*$slot: luks2"; then wipe="--wipe-slot=$slot"; fi; ` +
+		`for i in 1 2 3 4 5; do ` +
+		`if /usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` ` +
+		`--unlock-key-file=/etc/fisherman/tpm2-enroll.key $wipe ` +
+		`/dev/disk/by-uuid/` + luksUUID + `; then ` +
+		`if [ -n "$esp" ]; then ` +
+		`rm -f "$mnt/` + credentialPath + `" "$mnt/` + markerPath + `" || exit 1; ` +
+		`umount "$mnt" || exit 1; ` +
+		`fi; ` +
+		`exit 0; ` +
+		`fi; sleep 5; ` +
+		`done; exit 1`
+
 	unit := `[Unit]
 Description=Fisherman first-boot TPM2 LUKS enrollment
 Documentation=https://github.com/tuna-os/fisherman
@@ -276,7 +326,7 @@ TimeoutStartSec=120
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStartPre=/bin/echo 'enrolling disk auto-unlock; this takes a few seconds'
-` + loadCredential + `ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll --tpm2-device=auto ` + enroll + ` --unlock-key-file=/etc/fisherman/tpm2-enroll.key /dev/disk/by-uuid/` + luksUUID + ` && exit 0; sleep 5; done; exit 1'
+` + loadCredential + `ExecStart=/bin/bash -c '` + cleanup + `'
 ExecStartPost=-/usr/bin/shred -u /etc/fisherman/tpm2-enroll.key
 ` + shredPin + `ExecStartPost=-/usr/bin/systemctl disable fisherman-tpm2-enroll.service
 

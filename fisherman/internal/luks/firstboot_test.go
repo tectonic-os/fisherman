@@ -78,8 +78,17 @@ func TestStageFirstBootEnrollment(t *testing.T) {
 		"ConditionPathExists=/etc/fisherman/tpm2-enroll.key",
 		// The bounded retry, without which an emulated TPM's first
 		// Esys_LoadExternal failure leaves the machine with no token.
-		"for i in 1 2 3 4 5; do /usr/bin/systemd-cryptenroll",
-		"&& exit 0; sleep 5; done; exit 1",
+		"for i in 1 2 3 4 5; do if /usr/bin/systemd-cryptenroll",
+		"exit 0; fi; sleep 5; done; exit 1",
+		// The automatic finalize's cleanup: the ESP is found by its GPT
+		// type, the marker names the one-time slot, and the enrollment
+		// command wipes that slot while the unit deletes both files.
+		`[ "$parttype" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ]`,
+		"loader/credentials/cryptsetup.slot",
+		"loader/credentials/cryptsetup.passphrase.cred",
+		`wipe="--wipe-slot=$slot"`,
+		"--unlock-key-file=/etc/fisherman/tpm2-enroll.key $wipe",
+		"rm -f \"$mnt/loader/credentials/cryptsetup.passphrase.cred\"",
 		// No login prompt of any kind starts before enrollment finishes,
 		// and what it prints reaches the console it would print over.
 		"Before=systemd-user-sessions.service",
