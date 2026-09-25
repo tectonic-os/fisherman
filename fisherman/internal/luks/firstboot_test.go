@@ -30,7 +30,7 @@ func TestImageHasPcrPolicy(t *testing.T) {
 		"podman", "run", "--rm", "--pull=never", "--net=none",
 		"--security-opt", "label=disable", "--entrypoint", "",
 		"example.invalid/image:1", "/usr/bin/test", "-s",
-		"/usr/share/tectonic/pcr-policy.pem",
+		"/usr/share/secureboot/pcr-policy.pem",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("probe = %q, want %q", got, want)

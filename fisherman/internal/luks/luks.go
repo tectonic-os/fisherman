@@ -160,7 +160,7 @@ func ImageHasPcrPolicy(image string) bool {
 		image,
 		"/usr/bin/test",
 		"-s",
-		"/usr/share/tectonic/pcr-policy.pem",
+		"/usr/share/secureboot/pcr-policy.pem",
 	) == nil
 }
 
